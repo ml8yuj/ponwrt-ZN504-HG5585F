@@ -1,0 +1,150 @@
+name: Build PonWrt for HG5382A
+
+# 只编 fiberhome_hg5382a：不改动作者任何原文件，全部逻辑在本文件内完成
+on:
+  workflow_dispatch:
+  push:
+    branches: [master]
+    paths:
+      - '.github/workflows/build-hg5382a.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CCACHE_COMPILERCHECK: '%compiler% -dumpmachine; %compiler% -dumpversion'
+  CCACHE_MAXSIZE: 5G
+
+jobs:
+  build:
+    name: Build fiberhome_hg5382a
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Free build space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache || true
+          sudo docker image prune --all --force 2>/dev/null || true
+          sudo apt-get clean
+
+      - name: Install build dependencies
+        run: |
+          sudo DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get install -y --no-install-recommends \
+            asciidoc autoconf automake autopoint binutils bison build-essential \
+            bzip2 ccache clang cmake cpio curl device-tree-compiler flex gawk \
+            gettext git g++-multilib gcc-multilib gperf help2man intltool \
+            libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev \
+            libmpfr-dev libncurses-dev libpython3-dev libreadline-dev libssl-dev \
+            libtool libyaml-dev lld llvm ninja-build p7zip-full patch pkgconf \
+            python3 python3-docutils python3-pip python3-ply python3-pyelftools \
+            qemu-utils re2c rsync scons squashfs-tools subversion swig texinfo \
+            uglifyjs unzip wget xmlto xxd zlib1g-dev zstd
+
+      - name: Cache downloads
+        uses: actions/cache@v4
+        with:
+          path: dl
+          key: ponwrt-dl-hg5382a-${{ hashFiles('feeds.conf.default', 'configs/*.config') }}
+          restore-keys: |
+            ponwrt-dl-hg5382a-
+            ponwrt-dl-zn504-
+
+      - name: Update and install feeds
+        run: |
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Prepare custom packages
+        run: bash ./scripts/customize.sh
+
+      - name: Restore compiler ccache
+        uses: actions/cache/restore@v4
+        with:
+          path: .ccache
+          key: ponwrt-ccache-hg5382a-${{ hashFiles('configs/*.config') }}-${{ github.sha }}
+          restore-keys: |
+            ponwrt-ccache-hg5382a-${{ hashFiles('configs/*.config') }}-
+            ponwrt-ccache-hg5382a-
+
+      - name: Configure for HG5382A only
+        run: |
+          ./scripts/kconfig.pl + configs/an7581.config configs/release.config > .config
+
+          # ---- 只留 HG5382A ----
+          # 删掉所有 DEVICE 选择行（新式 + 旧单 profile 式，后者与前者互相矛盾）
+          grep -v '^CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_' .config > .config.tmp && mv .config.tmp .config
+          grep -v '^# CONFIG_TARGET_airoha_an7581_DEVICE_'            .config > .config.tmp && mv .config.tmp .config
+
+          cat >> .config <<'EOF'
+          CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_fiberhome_hg5382a=y
+          CONFIG_TARGET_DEVICE_PACKAGES_airoha_an7581_DEVICE_fiberhome_hg5382a=""
+          # HG5382A 无 Wi-Fi（DTS 内无 wlan/mt7916 节点）
+          # CONFIG_PACKAGE_kmod-mt7915e is not set
+          # CONFIG_PACKAGE_kmod-mt7916-firmware is not set
+          # CONFIG_PACKAGE_znxt-zn515-mt7916-eeprom is not set
+          # CONFIG_PACKAGE_kmod-cfg80211 is not set
+          # CONFIG_PACKAGE_kmod-mac80211 is not set
+          # CONFIG_PACKAGE_wpad-openssl is not set
+          # CONFIG_PACKAGE_wireless-regdb is not set
+          # CONFIG_PACKAGE_iw is not set
+          # CONFIG_PACKAGE_iwinfo is not set
+          # 不用透明代理
+          # CONFIG_PACKAGE_luci-app-momo is not set
+          # CONFIG_PACKAGE_momo is not set
+          # CONFIG_PACKAGE_sing-box is not set
+          # 2.5G 口是外置 MaxLinear GPY211，不是 EN8811H
+          # CONFIG_PACKAGE_airoha-en8811h-firmware is not set
+          CONFIG_PACKAGE_kmod-phy-maxlinear=y
+          CONFIG_PACKAGE_kmod-phy-realtek=y
+          EOF
+
+          # ccache
+          sed -i '/^CONFIG_DEVEL=/d; /^CONFIG_CCACHE=/d' .config
+          printf 'CONFIG_DEVEL=y\nCONFIG_CCACHE=y\n' >> .config
+
+          make defconfig
+
+          echo "=== 生效设备（必须只有 1 行且是 hg5382a）==="
+          grep '^CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_.*=y' .config
+          echo "=== 无线栈自检（必须全是 is not set）==="
+          grep -E 'CONFIG_PACKAGE_(kmod-mt7915e|kmod-mt7916-firmware|wpad-openssl|kmod-cfg80211)' .config || true
+          echo "=== 无线前端包自检（应无 wireless-provisioning-default 等）==="
+          grep -c 'CONFIG_PACKAGE_kmod-mac80211=y' .config || true
+
+      - name: Download package sources
+        run: make download -j"$(nproc)"
+
+      - name: Compile firmware
+        run: |
+          [ -x staging_dir/host/bin/ccache ] && CCACHE_DIR=$PWD/.ccache staging_dir/host/bin/ccache -z || true
+          make -j"$(nproc)" || make -j1 V=s
+
+      - name: Save compiler ccache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: .ccache
+          key: ponwrt-ccache-hg5382a-${{ hashFiles('configs/*.config') }}-${{ github.sha }}
+
+      - name: Collect artifacts
+        run: |
+          mkdir -p output
+          find bin/targets/airoha/an7581/ -type f -name "*hg5382a*" \
+            \( -name "*sysupgrade.itb" -o -name "*recovery.itb" -o -name "*manifest" \) \
+            -exec cp {} output/ \;
+          cd output
+          for f in *; do [ -f "$f" ] && sha256sum "$f" > "$f.sha256"; done
+          echo "=== 产物 ==="; ls -lh
+
+      - name: Upload Firmware Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PonWrt-HG5382A-firmware
+          path: output/*
+          retention-days: 14
