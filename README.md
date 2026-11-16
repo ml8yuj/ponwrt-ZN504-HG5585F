@@ -21,19 +21,19 @@
 
 下表系统梳理了本项目（PonWrt 聚合增强版）相比官方上游 PonWrt / ImmortalWrt 公版及社区常见第三方固件的技术代差：
 
-| 维度 / 核心功能 | 官方上游 PonWrt / ImmortalWrt 公版 | 社区常见衍生固件 | **本项目 PonWrt (ZN504 & HG5585F 聚合增强版)** | 技术差距与实测收益 |
-| :--- | :--- | :--- | :--- | :--- |
-| **IPTV 1302 错误根治** | ❌ 未处理。组播口与业务口共用网桥，动态 MAC 学习引发 FDB 翻转 | ⚠️ 仅建议重启设备或转单播；部分仅加 `isolate` 仍会因入站流量翻转 | **独家补丁 `03-pon-userspace-iptv-bridge-mac-fix.patch`**：组播口 `learning='0'` + 动态探测业务口 BNG MAC 并静态固化 (`bridge fdb replace ... static`) | **彻底根除网桥 MAC 表翻转单播黑洞**，机顶盒秒速通过鉴权，连续观看与切台数天零 1302 鉴权超时 |
-| **HG5585F Wi-Fi 6 满血驱动与 NPU 硬件加速** | ❌ 仅包含基础 target 配置，无板载 EEPROM 提取、MAC 算号错位、缺失 WED 固件 | ⚠️ 无 NPU WED 直转加速，软中断挤压在 Core 0，测速仅 500~670 Mbps，长跑易发热卡死 | **集成 MT7916D + 8核 NPU WED 1200M 满血驱动**，预置校准与波束成形表，`/usr/sbin/pin-wifi-cpus.sh` 将 `mt76-tx* -> CPU3`，6 个 `napi` 打散至 `CPU0/1/2`，以太网 IRQ 17/21 亲和绑定 | **iPerf3 实测 Wi-Fi 5G 达 1144 Mbps 下行 / 1200 Mbps 上行**（峰值 1314+ Mbps），4 核负载绝对均衡，SoftIRQ 零积压 |
-| **PON 认证参数跨固件防丢与自动备份还原** | ❌ 升级固件默认冲刷覆盖 `/etc/config/pon`，未手动保存直接失联变砖 | ⚠️ 需用户手动登录 SSH 备份 UCI，刷机后逐条手动恢复 | **内置 `/usr/sbin/backup-fiberhome-pon.sh` 与 `restore-fiberhome-pon.sh`**，开机自动生成备份并永久注入 `/etc/sysupgrade.conf` 白名单 | **固件升级零丢配置**，无感保留 LOID、PON SN、Vendor ID 与宽带拨号账号，支持一键回滚 |
-| **NNdroid OLT 局端诊断与防掉线加固** | ❌ 缺失激光冷启动防抖，冷机上电偶发误报 `SYS_TX_READY` 被局端秒踢；LOID 仅固定右补零 | ⚠️ 遇华为/中兴等严苛 OLT 报 `reason=0x01` 难以定位，排查抓包极痛苦 | **集成达发 EN7572 激光冷启动 8 次硬件采样（140ms 稳定期）闭锁保护**；支持 Web 自由切换 LOID 左/右补零方向；状态页直显链路层 16 进制原始报文 (Wire Bytes)；Web 一键覆盖 PON MAC | **冷启动 100% 稳定出光上线**，直破华为等 OLT 认证壁垒，免抓包即可可视化诊断局端通信细节 |
-| **QWRT 16MB 网络缓冲区与低抖动调优** | ⚠️ 内核默认 2MB 缓冲，`netdev_max_backlog=1000`，`netdev_budget=300` | ⚠️ 缺乏系统级缓冲调优，BT/多任务并发时交换芯片 CDM 队列易丢包 | **统一对齐 16MB (`16777216`) TCP/UDP 核心与套接字缓冲区**，`netdev_max_backlog=16384`，`netdev_budget=600`，`dev_weight=128`，移植 `vm.percpu_pagelist_high_fraction=128` 内存防碎片，网卡队列扩容至 5000 | **彻底消除多核并发内存分配延迟与 CPU CDM1 交换队列突发溢出丢包**，保障 4K/8K 组播与万兆高通量零卡顿 |
-| **局域网广播免连接跟踪 (NOTRACK)** | ❌ UPnP SSDP 与 Windows WSD 广播全部进入 conntrack 状态表 | ❌ 未做旁路，局域网多设备时 conntrack 表与交换芯片队列严重膨胀 | **预置 SSDP (`239.255.255.250:1900`) 与 WSD (`3702`) 全链路 `NOTRACK` 规则**（覆盖 IPv4 与 IPv6） | **阻断局域网广播风暴污染连接跟踪表**，降低 CPU 查表开销并保护交换芯片硬件队列 |
-| **开箱即用 br-iptv 异 VLAN + rtp2httpd 双栈** | ❌ 无预置网桥与 IPTV 代理，需用户自行抓包建桥、配置 igmp-proxy | ⚠️ 常见为旧版单栈 udpxy，易引发二层组播环路反射或端口占用 | **开箱预置异 VLAN 隔离网桥 `br-iptv`（`isolate='1'` + `learning='0'`）**，集成 `rtp2httpd`（纯端口 4022 双栈监听、4 Worker 多核并发、16384 零拷贝池），预置 `/www/iptv.m3u` 与现代 Web 播放器 | **零门槛即插即用**，全屋电视盒子、手机、电脑免装复杂软件网页秒开，杜绝二层环路反射 |
-| **硬件与软件流卸载 (PPE + Flowtable)** | ⚠️ 常见固件缺少网桥流表补丁导致 AP 模式跨口转发无硬加速；开启硬件流表又常因驱动微码缺陷导致 IPv6 PPPoE 严重丢包卡死 | ⚠️ 驱动缺陷导致 IPv6 硬件流卸载断流，迫使用户彻底关闭硬件加速 | **默认全开启硬件与软件流卸载 (`flow_offloading='1'` + `flow_offloading_hw='1'`)，Web 界面支持随时自由切换** | **独家补丁 931 根治 AN7581 PPE 缺陷**：彻底修复 L3 IPv6 路由误落入 L2 subflow 覆写端口、NPU stats 重写死锁与 1518 字节 MTU 越界丢包，实现 **IPv4 + IPv6 双栈 100% 走 PPE 硬件流表直转**，千兆满速 CPU 仅 ~4%，夸克/阿里 CDN 秒开；网桥与路由全线速加速 |
-| **第一性原理纯净加解密流水线** | ⚠️ 保留 SafeXcel / EIP-93 协处理器驱动，诱发 DMA 性能倒挂 | ⚠️ 盲目保留硬件加密驱动，导致 Crypto API 优先级霸凌与 SoftIRQ 锁争用 | **遵循 ImmortalWrt 官方最新实践 (`da63f7d`)，彻底剔除 `kmod-crypto-hw-eip93` 负优化**，释放 4 核 1.2GHz ARMv8 NEON 原生向量计算 | **小包 DMA 刷脏与硬中断抢占彻底归零**；WireGuard (ChaCha20-Poly1305) 与 Sing-Box 纯 Go-assembly NEON 直算，延迟更低、吞吐更稳 |
-| **Sing-Box 原生 NFQUEUE 透明重定向** | ❌ 缺失 `kmod-nft-queue` 等内核驱动，开启 `auto_redirect: true` 必报 `-EINVAL` 崩溃 | ⚠️ 依赖脆弱复杂的自定义 nftables 脚本重定向，易与系统规则冲突 | **内核原生集成 Netfilter NFQUEUE 驱动，集成最新 `sing-box 1.15.0-alpha.13` 核心** 与 Momo 纯核心模式 (`core_only='1'`)，支持 `endpoints[].on_demand` | **原生 TUN 模式零拷贝透明网关重定向**，分流与直连完全遵循用户订阅规则，告别规则冲突 |
-| **CI/CD 构建流水线现代化** | ⚠️ 基础单任务构建，无编译器指纹匹配，无高级增量缓存 | ⚠️ 依赖易超时，编译时长动辄 2~4 小时，网络波动易使工作流夭折 | **吸收 1018ji/build-ponwrt-daily 精华**：Ubuntu 24.04 + Node 24，`CCACHE_COMPILERCHECK` 锁定指纹，5GB 增量编译缓存与 DL 依赖池复用，多镜像源自动测速回退，集成 yq | **增量构建时长大幅缩短至 20~35 分钟**，编译成功率稳定在 99% 以上，多源探活彻底告别 APT 超时 |
+| 核心功能 / 优化维度 | 上游公版 & 社区现状 (痛点) | 本项目聚合增强版 (独家根治与实测收益) |
+| :--- | :--- | :--- |
+| **IPTV 1302 鉴权根治** | ❌ 组播口与业务口共用网桥，动态 MAC 学习引发 FDB 翻转单播黑洞；社区多仅重启或转单播 | ✅ **独家补丁 `03-pon-userspace-iptv`**：组播口 `learning=0` + 动态探测业务口 BNG MAC 并静态固化，**彻底根除 1302 超时与黑洞，切台秒开** |
+| **HG5585F 满血 Wi-Fi 6** | ❌ 缺 EEPROM 提取与 WED 固件；无 NPU 直转加速，软中断全挤在 Core 0，测速仅 500~670M | ✅ **集成 MT7916D + 8核 NPU WED 1200M 驱动**，中断均衡绑定 4 核，**实测 5G 达 1144M 下行 / 1200M 上行**，软中断零积压 |
+| **PON 参数跨固件防丢** | ❌ 升级固件默认冲刷覆盖 `/etc/config/pon`，未手动保存直接失联变砖；社区需登录 SSH 手动备份 | ✅ **内置一键备份/还原脚本**，开机自动生成并注入系统升级白名单，**无感保留 LOID、SN、MAC 与宽带账号**，升级零丢配置 |
+| **NNdroid OLT 局端防掉线** | ❌ 缺激光冷机防抖，偶发误报 `SYS_TX_READY` 被局端秒踢；华为等 OLT 报 `reason=0x01` 难以定位 | ✅ **集成 EN7572 激光冷启动 8 次采样闭锁保护**；支持 Web 自由切换 LOID 补零；状态页直显 16 进制报文，**冷启动 100% 稳出光** |
+| **QWRT 16MB 网络缓冲** | ⚠️ 内核默认 2MB 缓冲，队列深度低，高并发 BT/多任务时交换芯片 CDM 队列易溢出丢包 | ✅ **对齐 QWRT 16MB (`16777216`) TCP/UDP 核心缓冲**，队列深度扩至 16384，内存防碎片，**彻底消除 CDM 突发溢出丢包** |
+| **广播免跟踪 (NOTRACK)** | ❌ UPnP SSDP 与 Windows WSD 广播泛滥进入 conntrack 状态表，导致查表开销剧增与队列膨胀 | ✅ **预置 SSDP (`239.255.255.250:1900`) 与 WSD (`3702`) 全链路 `NOTRACK` 规则**，阻断局域网广播风暴污染连接跟踪表 |
+| **开箱即用 br-iptv 代理** | ❌ 无预置网桥与代理，需自行抓包建桥；旧版单栈 udpxy 易引发二层组播环路反射与端口占用 | ✅ **预置隔离网桥 `br-iptv`（`isolate=1, learning=0`）**，集成 `rtp2httpd` 端口 4022 多核并发零拷贝，附带 Web 播放器，**全屋网页秒开** |
+| **双栈硬件流卸载 (PPE)** | ⚠️ 常见固件缺少网桥卸载补丁导致下行卸载率仅 17%；IPv6 PPPoE 严重丢包卡死，迫使用户关闭加速 | ✅ **独家补丁 931/932 修复 AN7581 PPE 缺陷与网桥从端口卸载**：实现 IPv4+IPv6 双栈 100% 直转，**千兆满速 CPU 仅 ~4%，下行硬件卸载率飙升至 90%+** |
+| **纯净硬件加解密优化** | ⚠️ 保留 SafeXcel / EIP-93 协处理器驱动，诱发 Crypto API 优先级霸凌、DMA 性能倒挂与锁争用 | ✅ **彻底剔除 `kmod-crypto-hw-eip93` 负优化**，释放 4 核 1.2GHz ARMv8 NEON 向量直算，**小包 DMA 刷脏归零，WireGuard/Sing-Box 吞吐更稳** |
+| **Sing-Box 原生 NFQUEUE** | ❌ 缺失 `kmod-nft-queue` 驱动，开 `auto_redirect` 必崩溃；依赖脆弱易冲突的自定义脚本 | ✅ **内核原生集成 Netfilter NFQUEUE 驱动与最新 `sing-box 1.15.0-alpha.13`** 与 Momo 核心模式，**原生 TUN 模式零拷贝透明网关重定向** |
+| **现代化 CI/CD 流水线** | ⚠️ 基础单任务无编译器指纹匹配，依赖易超时，编译动辄 2~4 小时且网络波动易断流 | ✅ **Ubuntu 24.04 + Node 24 + CCACHE 编译器指纹匹配**，5GB 增量编译缓存与多镜像测速回退，**构建大幅缩短至 20~35 分钟，成功率 99%+** |
 
 ---
 

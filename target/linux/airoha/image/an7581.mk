@@ -210,9 +210,19 @@ define Device/fiberhome_hg5585f-ct
 endef
 TARGET_DEVICES += fiberhome_hg5585f-ct
 
-# Disabled: non-standard USB 3.0 / SFP mods and CU (Unicom) models excluded as requested
+# CU (Unicom) variant shares the HG5585F UBI layout and common MT7916D platform,
+# but uses its own CU DTS and internal switch PHY mapping.
+define Device/fiberhome_hg5585f-cu
+  $(call Device/fiberhome_hg5585f-common)
+  DEVICE_MODEL := HG5585F
+  DEVICE_VARIANT := CU
+  DEVICE_DTS := an7581-fiberhome-hg5585f-cu
+  $(call Device/fiberhome_hg5585f-images)
+endef
+TARGET_DEVICES += fiberhome_hg5585f-cu
+
+# Disabled: non-standard USB 3.0 / SFP variants are intentionally excluded.
 # TARGET_DEVICES += fiberhome_hg5585f-ct-usb-sfp
-# TARGET_DEVICES += fiberhome_hg5585f-cu
 # TARGET_DEVICES += fiberhome_hg5585f-cu-usb-sfp
 
 # Both models share the UBI boot chain and store device data in factory.

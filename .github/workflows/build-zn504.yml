@@ -180,25 +180,35 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tag_name: ${{ steps.tag.outputs.release_tag }}
-          name: PonWrt ZN504XG-D & HG5585F 电信版聚合增强固件 (${{ steps.tag.outputs.release_tag }})
+          name: PonWrt ZN504XG-D & HG5585F 聚合增强固件 (${{ steps.tag.outputs.release_tag }})
           body: |
-            ## 🌟 较上一版 (v2026.11.14-0306) 核心变更与独家差异对比
+            ## 🌟 对比前一版本核心修复与优化说明
 
-            | 变更模块 | 上一版状态 (v2026.11.14-0306) | 本版重大升级 (当前版本) | 实机收益与用户感知 |
-            | :--- | :--- | :--- | :--- |
-            | **达发 AN7581 硬件流卸载 (PPE)** | ❌ 开启硬件流卸载后 IPv6 PPPoE 严重丢包断流（速度跌至几十 KB/s，阿里 CDN / 夸克卡死） | **独家内核补丁 `931-net-airoha-fix-wan-ipv6-pppoe-flow-offload.patch`**：根治 L3 IPv6 误落入 L2 subflow 覆写 PPPoE ID、NPU stats 死锁与 1518 字节 MTU 越界硬件丢包 | **IPv4 与 IPv6 双栈 100% PPE 硬件芯片直转加速**，夸克/网盘秒开，满带宽极速冲刺，CPU 占用低至 ~4% |
-            | **电信 4K/8K IPTV 1302 错误** | ❌ 业务口与组播口共用网桥，上游 BNG 相同 MAC 导致 FDB 翻转单播黑洞，机顶盒鉴权超时报 1302 | **独家补丁 `03-pon-userspace-iptv-bridge-mac-fix.patch`**：组播下行口强制 `learning='0'`，动态探测网关 MAC 并静态固化到业务口 | **彻底根除网桥 MAC 表翻转**，机顶盒秒速通过鉴权，4K/8K 组播画质流畅不卡顿 |
-            | **YAML CLI 工具链** | ❌ 无轻量级 YAML/JSON 命令行转换工具 | **原生集成高性能 `CONFIG_PACKAGE_yq=y`** | 为复杂订阅规则与自动化网络脚本提供便捷的命令行配置解析能力 |
-            | **节点测速与防断流稳定性** | ⚠️ `scheduled_restart` 偶发冷启动导致全节点短暂超时变灰 | **默认关闭定时重启**，优化 `interval: 15m` 与 `tolerance: 35` | 杜绝并发测速打爆电信 CGNAT 状态表，节点全天候 25/25 在线低延迟 |
-            | **CI/CD 构建流水线架构** | ⚠️ 无编译器指纹缓存，每次构建耗时长达 2 小时+ | **升级 Ubuntu 24.04 + Ccache 编译器指纹持久化机制 + 5GB 缓存池** | 后续增量构建耗时锐减至 20~30 分钟，出包速度提升 60%+ |
-            | **系统纯净度与后台守护** | ⚠️ 内置实验性 `traffic-profiler` 采样工具 | **彻底移除 `traffic-profiler` 与 Crontab 定时器** | 恢复 100% 纯净系统，保持 1.2GHz 全血自适应调度，零后台负载 |
+            ### 1. 硬件流表与 CPU 性能根修（PPE 驱动与内核）
+            - **修复局域网下行硬件流表卸载失效导致 CPU 负载高与 DMA 丢包（内核补丁 `932-net-airoha-ppe-support-bridge-fdb-port-offload.patch`）**：
+              - 修复了 OpenWrt 网桥模式（`br-lan`）下，Airoha PPE 驱动因出口设备为虚拟网桥而拒绝硬件卸载（返回 `-EINVAL`）、导致数据全部回退到 CPU DMA（CDM2）引发环形缓冲区队列溢出丢包（CDM1 Drops）的根本缺陷。
+              - 引入内核网桥 FDB 转发表端口反查机制，使发往局域网客户端的有线（`lan1-lan4`）与无线（`phy0-ap0`）下行流量均能成功进入硬件流表，实现纯线速硬件直转，彻底消除 CPU 软中断瓶颈。
+            - **修复 IPv6 PPPoE 硬件卸载严重降速与丢包缺陷（内核补丁 `931-net-airoha-fix-wan-ipv6-pppoe-flow-offload.patch`）**：
+              - 修复了未命中 FOE 时 IPv6 路由包错误掉入 L2 查找导致 PPPoE Session ID 被篡改的黑洞问题；
+              - 修复了 AN7581 NPU 尝试更新未对齐的 IPv6 计数器导致的硬件流水线卡死；
+              - 修复了硬件 MTU 计算未包含 PPPoE 与双层 VLAN 额外 16 字节头部开销导致的静默丢包。
+
+            ### 2. Sing-box (momo) 内存与网络体验优化
+            - **修复嵌入式设备上 Go 运行时内存膨胀（VmRSS 飙高）问题**：
+              - 针对 512MB 内存环境，注入 `GODEBUG=madvdontneed=1` 与合理的 `GOMEMLIMIT`，解决 Linux 内核默认 `MADV_FREE` 机制导致物理内存无法及时释放的问题，使系统常驻可用内存保持在 130MB+ 的健康绿区。
+            - **新增网络热插拔自动预热脚本 (`98-momo-warmup`)**：
+              - 在 WAN 口或 PPPoE 重连上线时自动快速预热核心与节点连接，杜绝网络恢复后的首包等待延迟。
+
+            ### 3. 机型支持与服务修复
+            - **新增 FiberHome HG5585F CU（联通版）机型构建支持**：
+              - 启用独立设备 Profile 定义与专用的 DTS 镜像构建链。
+            - **修复 IPTV 与防火墙细节**：
+              - 修复 `rtp2httpd` 多实例初始化逻辑，完善 momo 防火墙专区配置。
 
             ---
-
-            ### PonWrt Airoha AN7581 聚合增强固件 (ZN504XG-D & HG5585F 电信版)
             * **适用机型**：
               - **烽火/中移 ZN504XG-D**：纯有线 2.5G 高性能光猫（AN7581 + EN8811H 2.5G 网口）
-              - **烽火 HG5585F (CT 电信标准版)**：带 Wi-Fi 6 (MT7916D DBDC AX3000 + NPU WED 硬件加速，标准原生 USB 2.0 硬件配置)
+              - **烽火 HG5585F (CT 电信版 / CU 联通版)**：带 Wi-Fi 6 (MT7916D DBDC AX3000 + NPU WED 硬件加速，标准原生 USB 2.0 硬件配置)
             * **后台管理**：`192.168.1.1`（用户名: `root`，默认无密码）
             * **Wi-Fi 6 / 四核无线亲和性调优 (HG5585F)**：
               - 集成 MediaTek MT7916 驱动与 NPU WED 硬件加速固件 (`en7581_MT7916_npu_rv32.bin`)
