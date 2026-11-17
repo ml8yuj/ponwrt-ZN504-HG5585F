@@ -1,0 +1,12 @@
+#!/bin/sh
+[ "$ACTION" = "add" ] || [ "$ACTION" = "bind" ] || [ "$ACTION" = "ifup" ] || exit 0
+
+dev="${DEVICENAME:-$INTERFACE}"
+case "$dev" in
+    pppoe-wan|phy0-ap0|phy1-ap0|pon0|br-lan|tun0)
+        if [ -d "/sys/class/net/$dev/queues/rx-0" ]; then
+            echo f > "/sys/class/net/$dev/queues/rx-0/rps_cpus" 2>/dev/null
+            echo 4096 > "/sys/class/net/$dev/queues/rx-0/rps_flow_cnt" 2>/dev/null
+        fi
+        ;;
+esac

@@ -12,10 +12,11 @@ if [ -f /etc/init.d/packet_steering ]; then
     /etc/init.d/packet_steering stop 2>/dev/null || true
 fi
 
-# 1.1 默认全开启 Firewall4 硬件流卸载（结合内核补丁 931 彻底修复达发 AN7581 PPE 硬件驱动在 IPv6 PPPoE 下的 L2 subflow 覆写端口、NPU stats 重写死锁与 1518 字节 MTU 越界硬件丢包，实现 IPv4 + IPv6 双栈全速 PPE 硬件流表直转；Web 界面保留用户自主切换选项）
+# 1.1 默认全开启 Firewall4 硬件流卸载与 FullCone NAT（结合内核补丁 931 彻底修复达发 AN7581 PPE 硬件驱动在 IPv6 PPPoE 下的 L2 subflow 覆写端口、NPU stats 重写死锁与 1518 字节 MTU 越界硬件丢包，实现 IPv4 + IPv6 双栈全速 PPE 硬件流表直转；Web 界面保留用户自主切换选项）
 uci -q batch <<EOF
 set firewall.@defaults[0].flow_offloading='1'
 set firewall.@defaults[0].flow_offloading_hw='1'
+set firewall.@defaults[0].fullcone='1'
 add_list firewall.@zone[1].network='wan_6'
 commit firewall
 EOF
@@ -118,62 +119,36 @@ if [ -f /etc/config/udpxy ]; then
 fi
 
 
-# 3. 禁用系统自带独立 sing-box 服务自启（由 momo 独占调度管理，彻底杜绝双进程冲突与端口争抢）
-if [ -f /etc/init.d/sing-box ]; then
-    /etc/init.d/sing-box disable 2>/dev/null
-    /etc/init.d/sing-box stop 2>/dev/null
-fi
-rm -f /etc/rc.d/S*sing-box 2>/dev/null
-
-# 3.1 预置 Firewall4 对 Momo (tun0) 的放行与转发表（彻底杜绝 DNS 劫持丢包与转发拒绝，确保直连与内网分流无缝打通）
-if [ -z "$(uci -q get firewall.momo)" ]; then
+# 3. 预置 Firewall4 对原生透明代理 (tun0) 的放行与转发表（确保直连与内网分流无缝打通）
+if [ -z "$(uci -q get firewall.proxy)" ]; then
     uci -q batch << 'EOF'
-set firewall.momo=zone
-set firewall.momo.name='momo'
-set firewall.momo.input='ACCEPT'
-set firewall.momo.output='ACCEPT'
-set firewall.momo.forward='ACCEPT'
-add_list firewall.momo.device='tun0'
+set firewall.proxy=zone
+set firewall.proxy.name='proxy'
+set firewall.proxy.input='ACCEPT'
+set firewall.proxy.output='ACCEPT'
+set firewall.proxy.forward='ACCEPT'
+add_list firewall.proxy.device='tun0'
 
-set firewall.lan_momo=forwarding
-set firewall.lan_momo.src='lan'
-set firewall.lan_momo.dest='momo'
+set firewall.lan_proxy=forwarding
+set firewall.lan_proxy.src='lan'
+set firewall.lan_proxy.dest='proxy'
 
-set firewall.momo_lan=forwarding
-set firewall.momo_lan.src='momo'
-set firewall.momo_lan.dest='lan'
+set firewall.proxy_lan=forwarding
+set firewall.proxy_lan.src='proxy'
+set firewall.proxy_lan.dest='lan'
 
-set firewall.momo_wan=forwarding
-set firewall.momo_wan.src='momo'
-set firewall.momo_wan.dest='wan'
+set firewall.proxy_wan=forwarding
+set firewall.proxy_wan.src='proxy'
+set firewall.proxy_wan.dest='wan'
 commit firewall
 EOF
 fi
 
-# 4. 预置 momo 纯核心模式（分流与旁路规则完全遵循 sing-box 订阅与原生 auto_redirect）、默认优先远程配置 (prefer='remote')、128MiB 健康堆内存上限（适配 512MB RAM）、定时重启与日志自动清理
-if [ -f /etc/config/momo ]; then
-    uci -q batch <<EOF
-set momo.config.core_only='1'
-set momo.procd.env_go_mem_limit='128MiB'
-set momo.log.scheduled_clear='1'
-set momo.log.scheduled_clear_size_limit='1'
-set momo.log.scheduled_clear_size_limit_unit='MB'
-set momo.log.scheduled_clear_cron='0 * * * *'
-set momo.config.scheduled_restart='0'
-set momo.config.scheduled_restart_cron='0 4 * * *'
-commit momo
-EOF
-    for sub in $(uci -q show momo | grep '=subscription' | cut -d. -f2 | cut -d= -f1); do
-        uci -q set momo.${sub}.prefer='remote'
-    done
-    uci -q commit momo
-fi
-if [ -f /etc/init.d/momo ]; then
-    /etc/init.d/momo enable 2>/dev/null || true
-fi
-mkdir -p /etc/momo/profiles
+# 4. 双核配置目录预置
+mkdir -p /etc/sing-box /etc/honk
 
 # 确保热插拔与系统调优脚本拥有执行权限
+chmod +x /etc/hotplug.d/net/50-fw4-bridge-reload 2>/dev/null || true
 chmod +x /etc/hotplug.d/net/99-multicast 2>/dev/null || true
 chmod +x /etc/hotplug.d/net/99-wifi-affinity 2>/dev/null || true
 chmod +x /etc/hotplug.d/iface/90-ipv6-fix 2>/dev/null || true
@@ -250,7 +225,7 @@ uci set system.@system[0].zram_size_mb='256'
 uci set system.@system[0].zram_comp_algo='zstd'
 uci commit system
 
-# 7. 每日凌晨 04:30 自动执行 ZRAM 内存空洞压缩整理（紧跟 04:00 momo 定时重启之后）
+# 7. 每日凌晨 04:30 自动执行 ZRAM 内存空洞压缩整理
 mkdir -p /etc/crontabs
 (crontab -l 2>/dev/null | grep -v 'compact'; echo "30 4 * * * echo 1 > /sys/block/zram0/compact 2>/dev/null") | crontab -
 
@@ -261,10 +236,10 @@ echo 'hsts=0' > /root/.wgetrc
 sed -i '/log-facility/d' /etc/dnsmasq.conf 2>/dev/null
 echo "log-facility=/dev/null" >> /etc/dnsmasq.conf
 
-# 9. 烽火 (FiberHome) PON 认证与 Momo 自启配置跨版本升级自动保护机制
-# 将关键路径加入 /etc/sysupgrade.conf，防止固件升级抹除认证数据与开机自启
+# 9. 烽火 (FiberHome) PON 认证与双核代理配置跨版本升级自动保护机制
+# 将关键路径加入 /etc/sysupgrade.conf，防止固件升级抹除认证数据与代理配置
 SYSUPGRADE_CONF="/etc/sysupgrade.conf"
-for path in "/etc/config/pon" "/etc/fiberhome_pon_backup.uci" "/etc/fiberhome_pon_info.txt" "/usr/sbin/backup-fiberhome-pon.sh" "/usr/sbin/restore-fiberhome-pon.sh" "/etc/rc.d/S99momo" "/etc/rc.d/K10momo"; do
+for path in "/etc/config/pon" "/etc/fiberhome_pon_backup.uci" "/etc/fiberhome_pon_info.txt" "/usr/sbin/backup-fiberhome-pon.sh" "/usr/sbin/restore-fiberhome-pon.sh" "/etc/sing-box" "/etc/honk" "/etc/config/honk" "/usr/bin/sb-honk" "/usr/bin/sb-bonk"; do
     if ! grep -q "^$path" "$SYSUPGRADE_CONF" 2>/dev/null; then
         echo "$path" >> "$SYSUPGRADE_CONF"
     fi
@@ -355,5 +330,18 @@ set system.@system[0].zonename='Asia/Shanghai'
 commit system
 EOF
 /etc/init.d/system reload 2>/dev/null || true
+
+# 13. 强制重定向局域网 NTP (UDP 123) 请求至路由器本地 NTP 服务
+if [ -z "$(uci -q get firewall.ntp_redirect)" ]; then
+    uci -q batch << 'EOF'
+set firewall.ntp_redirect=redirect
+set firewall.ntp_redirect.name='Redirect-NTP'
+set firewall.ntp_redirect.src='lan'
+set firewall.ntp_redirect.proto='udp'
+set firewall.ntp_redirect.src_dport='123'
+set firewall.ntp_redirect.target='DNAT'
+commit firewall
+EOF
+fi
 
 exit 0

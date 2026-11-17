@@ -19,17 +19,59 @@
 //              when the bridges hold FDB_LIMIT entries or more between
 //              them, counted first through sysfs without reading further: a flood of
 //              made-up addresses must not make rpcd build the whole
-//              table. Where a port is a VLAN on a swconfig switch
+//              table. The dump also has a switch driver read its chip's
+//              own table (29 ms a dump on a MediaTek MT7981 router, #101),
+//              so it is taken again only when sysfs brforward, read every
+//              call, shows a host arrive, leave or change port, or after
+//              FDB_DUMP_S; in between, the last dump's hosts with
+//              brforward's times since heard. Where a port is a VLAN on a swconfig switch
 //              (eth1.1), also which switch ports that VLAN has
 //              (switches): from /etc/board.json (the CPU port's network
 //              device, the ports' roles) and the switch_vlan sections of
 //              /etc/config/network (device, vlan, vid and ports, nothing
 //              else), or board.json's roles for a switch those give no
 //              VLAN. Read group luci-app-vantage.
+//   routes     the route the kernel takes to the internet, IPv4 and IPv6:
+//              a read-only lookup of each family (as `ip route get
+//              fibmatch`) of a documentation address no network uses, so
+//              the answer is the default route ordinary traffic takes.
+//              For each family whose answer is a unicast default route in
+//              the main table: its family (4 or 6), the device it leaves by
+//              (null over several next hops) and its metric; no gateways.
+//              netifd lists the routes it asked for; of two with the same
+//              metric the kernel keeps the one added last. routes is null
+//              when a lookup could not be sent. One lookup a family, so
+//              the work does not grow with the routing table. Read group
+//              luci-app-vantage.
+//   survey     { device }: the channel survey of one Wi-Fi interface, for
+//              the noise floor: { mhz, noise } (dBm) for each channel the
+//              driver gives a noise value, at most MAX_SURVEY: one
+//              read-only NL80211 survey dump. Not through rpcd's iwinfo
+//              survey: libiwinfo has a survey for its NL80211 backend
+//              only, and for any other (the MediaTek mtwifi backend of
+//              the mt798x builds) rpcd calls the missing function and
+//              dies (#124). Only an interface that cfg80211 drives (a
+//              phy80211 link in sysfs) is asked; any other device: no
+//              channels. Read group luci-app-vantage.
 //   set_alias  { mac, name, icon }: name one station, or remove its name
 //              with name ''. Validated here, whatever the browser did, and
 //              written to /etc/config/vantage only. Write group
 //              luci-app-vantage-names.
+//   set_quiet  { mac, quiet }: whether the dashboard leaves one station's
+//              weak signal out of its warnings (#110): a quiet section
+//              with its MAC in /etc/config/vantage, at most MAX_QUIET.
+//              Write group luci-app-vantage-names.
+//   fwx        the reads luci-app-fwx-dashboard's Lua controller makes of
+//              fwxd (ubus object fwx / method common, dispatched by an
+//              `api` name), aggregated into one reply: { ok, common,
+//              top_users, app_stats, rates }. One ubus connection, five
+//              calls; only replies with code 2000 and an object `data` are
+//              kept. fwxd absent: { ok: false }, no state cached.
+//              `rates` is the per-MAC throughput fwx's kernel module
+//              accounts (up, down in bytes/s, routed traffic only), cut
+//              down to { mac: [ up, down ] }: the Clients tile shows it for
+//              a client whose driver reports no station counters of its own.
+//              Read group luci-app-vantage.
 //
 // Keep the validation in step with names.js (validateAlias, normMac,
 // ICONS) and with dev/replay/vantage-plugin.js; tests/plugin.test.js runs
@@ -39,26 +81,59 @@
 
 import { cursor } from 'uci';
 import { connect } from 'ubus';
-import { lsdir, readfile } from 'fs';
+import { access, lsdir, readfile } from 'fs';
 import * as rtnl from 'rtnl';
+import * as nl80211 from 'nl80211';
 
 const CONFIG = 'vantage';
 const WIRELESS = 'wireless';      // read only, by wireless_from_config()
 const NAME_MAX = 48;              // code points, after collapsing spaces
 const NAME_MAX_UNITS = NAME_MAX * 8; // raw input cap, in UTF-16 code units (as names.js)
 const MAX_ALIASES = 512;          // client sections; bounds /etc/config/vantage
+const MAX_QUIET = 512;            // quiet sections, likewise
 const ICONS = [ 'phone', 'laptop', 'tablet', 'desktop', 'tv', 'speaker', 'printer', 'camera', 'console', 'watch', 'iot', 'router', 'device' ];
 const THERMAL = '/sys/class/thermal';
 const MAX_ZONES = 16;
 const MAX_HOSTS = 512;            // wired hosts per reply
 const MAX_PER_PORT = 128;         // of them on one port (the uplink's would take them all)
+const PROBE4 = '198.51.100.1';    // routes: looked up, never sent to (documentation ranges)
+const PROBE6 = '2001:db8::1';
 const NET = '/sys/class/net';
 const FDB_LIMIT = 4096;           // forwarding entries, all bridges together, before wired() lists none
 const FDB_ENTRY = 16;             // sizeof(struct __fdb_entry), brforward's record
+const FDB_DUMP_S = 30;            // the netlink dump at least this often (VLANs, static entries)
+const FDB_PARSE = 512;            // brforward records read one by one, all bridges; above: the dump each call
 const NETWORK = 'network';        // read only, by switches(): switch_vlan sections
 const BOARD = '/etc/board.json';
 const BOARD_MAX = 65536;          // bytes read of it
 const MAX_SWITCH_VLANS = 64;
+const MAX_SURVEY = 256;          // channels in a survey reply (a tri-band wiphy has about 100)
+const MAX_MHZ = 100000;          // a channel's frequency, MHz (60 GHz is 70200)
+
+// Patterns, compiled once: ucode compiles a regular expression literal each
+// time the code reaches it, and a counted repeat ({1,64}) costs musl
+// milliseconds to compile on a router (8.5 ms against 0.07 ms for the same
+// test with the pattern compiled once, on an ARM Wi-Fi AP). rpcd keeps
+// this module loaded, these with it, between calls.
+const RE_MAC_COLON = /^[0-9a-f]{2}(:[0-9a-f]{2}){5}$/;
+const RE_MAC_DASH = /^[0-9a-f]{2}(-[0-9a-f]{2}){5}$/;
+const RE_MAC_DOTS = /^[0-9a-f]{4}\.[0-9a-f]{4}\.[0-9a-f]{4}$/;
+const RE_MAC_BARE = /^[0-9a-f]{12}$/;
+const RE_DASHES = /-/g;
+const RE_DOTS = /\./g;
+const RE_PAIRS = /../g;
+const RE_SPACES = /\s+/;
+const RE_ENCRYPTION = /^[A-Za-z0-9+_-]{1,40}/;
+const RE_NAME = /^[A-Za-z0-9_.-]{1,64}$/;          // radio sections, interfaces
+const RE_ZONE = /^thermal_zone[0-9]{1,3}$/;
+const RE_MILLIDEG = /^-?[0-9]{1,7}$/;
+const RE_ZONE_TYPE = /^[A-Za-z0-9_.-]{1,40}$/;
+const RE_NETDEV = /^[A-Za-z0-9_.-]{1,15}$/;
+const RE_SWITCH_PORT = /^([0-9]{1,2})([t*]?)$/;    // '5t'
+const RE_SWITCH = /^[A-Za-z0-9_.-]{1,32}$/;
+const RE_ROLE = /^[a-z0-9]{1,16}$/;
+const RE_VID = /^[0-9]{1,4}$/;
+const RE_VLAN_DEV = /^[A-Za-z0-9_-]{1,10}\.([0-9]{1,4})$/;  // 'eth1.1'
 
 /* ------------------------------------------------------------ helpers */
 
@@ -69,15 +144,15 @@ function norm_mac(v) {
 
 	let h = lc(trim(v));
 
-	if (match(h, /^[0-9a-f]{2}(:[0-9a-f]{2}){5}$/))
+	if (match(h, RE_MAC_COLON))
 		return h;
 
-	if (match(h, /^[0-9a-f]{2}(-[0-9a-f]{2}){5}$/))
-		return replace(h, /-/g, ':');
+	if (match(h, RE_MAC_DASH))
+		return replace(h, RE_DASHES, ':');
 
-	if (match(h, /^[0-9a-f]{4}\.[0-9a-f]{4}\.[0-9a-f]{4}$/) || match(h, /^[0-9a-f]{12}$/)) {
-		h = replace(h, /\./g, '');
-		return join(':', map(match(h, /../g), (m) => m[0]));
+	if (match(h, RE_MAC_DOTS) || match(h, RE_MAC_BARE)) {
+		h = replace(h, RE_DOTS, '');
+		return join(':', map(match(h, RE_PAIRS), (m) => m[0]));
 	}
 
 	return null;
@@ -209,7 +284,7 @@ function uci_true(v) {
 // the encryption mode ('sae-mixed+ccmp', 'psk2', 'none', ...): its leading
 // run of mode characters and nothing after it
 function encryption(v) {
-	let m = (type(v) == 'string') ? match(v, /^[A-Za-z0-9+_-]{1,40}/) : null;
+	let m = (type(v) == 'string') ? match(v, RE_ENCRYPTION) : null;
 	return m ? m[0] : null;
 }
 
@@ -277,7 +352,7 @@ function wireless_from_config() {
 		return out;
 
 	wl.foreach(WIRELESS, 'wifi-device', (s) => {
-		if (match(s['.name'], /^[A-Za-z0-9_.-]{1,64}$/))
+		if (match(s['.name'], RE_NAME))
 			radios[s['.name']] = { disabled: uci_true(s.disabled), config: { ...s, txpower: null }, interfaces: [] };
 	});
 
@@ -286,14 +361,14 @@ function wireless_from_config() {
 		let ifname = s.ifname;
 
 		if (type(r) != 'object' || uci_true(s.disabled) || type(ifname) != 'string' ||
-		    !match(ifname, /^[A-Za-z0-9_.-]{1,64}$/) || taken[ifname])
+		    !match(ifname, RE_NAME) || taken[ifname])
 			return;
 
 		taken[ifname] = true;
 		push(r.interfaces, {
 			ifname,
 			section: s['.name'],
-			config: { ...s, network: (type(s.network) == 'string') ? filter(split(s.network, /\s+/), (n) => n != '') : s.network }
+			config: { ...s, network: (type(s.network) == 'string') ? filter(split(s.network, RE_SPACES), (n) => n != '') : s.network }
 		});
 	});
 
@@ -386,13 +461,70 @@ function set_alias(args) {
 	return { ok: true, op, mac };
 }
 
+/* ---------------------------------------------------------- set_quiet */
+
+function set_quiet(args) {
+	let mac = norm_mac(args.mac);
+
+	if (!mac || is_multicast(mac))
+		return { ok: false, error: 'invalid-mac' };
+
+	if (type(args.quiet) != 'bool')
+		return { ok: false, error: 'invalid-value' };
+
+	let uci = cursor();
+	let mine = [], total = 0;
+
+	uci.load(CONFIG);
+	uci.foreach(CONFIG, 'quiet', (s) => {
+		total++;
+
+		if (norm_mac(s.mac) == mac)
+			push(mine, s['.name']);
+	});
+
+	let op;
+
+	if (args.quiet) {
+		if (length(mine))
+			return { ok: true, op: 'none', mac };
+
+		if (total >= MAX_QUIET)
+			return { ok: false, error: 'too-many' };
+
+		let sid = uci.add(CONFIG, 'quiet');
+
+		if (!sid)
+			return { ok: false, error: 'failed' };
+
+		uci.set(CONFIG, sid, 'mac', mac);
+		op = 'add';
+	}
+	else {
+		if (!length(mine))
+			return { ok: true, op: 'none', mac };
+
+		for (let sid in mine)
+			uci.delete(CONFIG, sid);
+
+		op = 'delete';
+	}
+
+	if (!uci.commit(CONFIG)) {
+		uci.revert(CONFIG);
+		return { ok: false, error: 'failed' };
+	}
+
+	return { ok: true, op, mac };
+}
+
 /* ------------------------------------------------------------ thermal */
 
 // [ { zone, type, temp } ] in zone order, at most MAX_ZONES; a zone whose
 // temperature cannot be read (switched off, no sensor yet) is left out,
 // a type that is not a plain word is sent as ''
 function thermal() {
-	let zones = filter(lsdir(THERMAL) ?? [], n => match(n, /^thermal_zone[0-9]{1,3}$/));
+	let zones = filter(lsdir(THERMAL) ?? [], n => match(n, RE_ZONE));
 	let out = [];
 
 	for (let n in sort(zones, (a, b) => int(substr(a, 12)) - int(substr(b, 12)))) {
@@ -401,12 +533,12 @@ function thermal() {
 
 		let temp = trim(readfile(THERMAL + '/' + n + '/temp', 16) ?? '');
 
-		if (!match(temp, /^-?[0-9]{1,7}$/))
+		if (!match(temp, RE_MILLIDEG))
 			continue;
 
 		let kind = trim(readfile(THERMAL + '/' + n + '/type', 64) ?? '');
 
-		push(out, { zone: n, type: match(kind, /^[A-Za-z0-9_.-]{1,40}$/) ? kind : '', temp: int(temp) });
+		push(out, { zone: n, type: match(kind, RE_ZONE_TYPE) ? kind : '', temp: int(temp) });
 	}
 
 	return out;
@@ -415,27 +547,74 @@ function thermal() {
 /* -------------------------------------------------------------- wired */
 
 function netdev(v) {
-	return type(v) == 'string' && match(v, /^[A-Za-z0-9_.-]{1,15}$/) ? v : null;
+	return type(v) == 'string' && match(v, RE_NETDEV) ? v : null;
 }
 
-// true when the bridges hold FDB_LIMIT forwarding entries or more
-// between them (one dump returns them all): each sysfs brforward lists
-// its bridge's as FDB_ENTRY-byte records, and the kernel fills only as
-// many as asked for, so no more than the budget left is read
-function crowded() {
+// The last netlink dump: { at, sig, hosts } (at: monotonic seconds; sig:
+// the brforward identity it was taken with), and the byte order of
+// brforward's ageing field (the host's: true little-endian), learned
+// from the first dump that pairs a record with a time since heard.
+// rpcd keeps this module, these with it, between calls.
+let fdb_last = null;
+let fdb_le = null;
+
+// The bridges' sysfs brforward tables: FDB_ENTRY-byte records (MAC, port
+// number, is_local, ageing in 1/100 s, the port number's high byte),
+// and the kernel fills only as many as asked for, so no more than the
+// budget left is read. null when the bridges hold FDB_LIMIT entries or
+// more between them (one dump returns them all); else { sig, ages,
+// multi }: sig names each learned entry (bridge, MAC, port) in the
+// kernel's order, which holds while the entries do; ages[bridge|mac] its
+// ageing field read both ways, [ little-endian, big-endian ], the
+// youngest of a MAC there more than once (on several VLANs); multi: a
+// MAC on two ports of one bridge, whose ages one key cannot tell apart.
+// Over FDB_PARSE records between them, { sig: null }: the records are
+// only counted, as before, and the caller dumps (a host making up
+// addresses near FDB_LIMIT must not make every call parse them all)
+function bridge_table() {
 	let left = FDB_LIMIT * FDB_ENTRY;
+	let sig = '', ages = {}, ports = {}, multi = false, tables = [];
 
 	for (let n in (lsdir(NET) ?? [])) {
 		let b = netdev(n) ? readfile(NET + '/' + n + '/brforward', left) : null;
 
-		if (type(b) == 'string')
-			left -= length(b);
+		if (type(b) != 'string')
+			continue;
+
+		left -= length(b);
 
 		if (left <= 0)
-			return true;
+			return null;
+
+		push(tables, [ n, b ]);
 	}
 
-	return false;
+	if (FDB_LIMIT * FDB_ENTRY - left > FDB_PARSE * FDB_ENTRY)
+		return { sig: null, ages, multi };
+
+	for (let t in tables) {
+		let n = t[0], b = t[1];
+
+		for (let o = 0; o + FDB_ENTRY <= length(b); o += FDB_ENTRY) {
+			if (ord(b, o + 7))
+				continue;
+
+			let k = n + '|' + sprintf('%02x:%02x:%02x:%02x:%02x:%02x', ord(b, o), ord(b, o + 1), ord(b, o + 2), ord(b, o + 3), ord(b, o + 4), ord(b, o + 5));
+			let le = ord(b, o + 8) | (ord(b, o + 9) << 8) | (ord(b, o + 10) << 16) | (ord(b, o + 11) << 24);
+			let be = (ord(b, o + 8) << 24) | (ord(b, o + 9) << 16) | (ord(b, o + 10) << 8) | ord(b, o + 11);
+			let a = ages[k], port = ord(b, o + 12) * 256 + ord(b, o + 6);
+
+			sig += k + '/' + port + ',';
+			ages[k] = a ? [ min(a[0], le), min(a[1], be) ] : [ le, be ];
+
+			if (ports[k] != null && ports[k] != port)
+				multi = true;
+
+			ports[k] = port;
+		}
+	}
+
+	return { sig, ages, multi };
 }
 
 // [ { mac, port, bridge, vlan, seen } ] in dump order, at most MAX_HOSTS
@@ -445,8 +624,21 @@ function crowded() {
 // bridge last heard from the host (the kernel counts in 1/100 s), null
 // for a static entry. null when a bridge is crowded.
 function wired() {
-	if (crowded())
+	let tb = bridge_table();
+
+	if (tb == null)
 		return null;
+
+	let now = clock(true)?.[0] ?? 0;
+
+	// the same hosts on the same ports: the last dump's, heard as now
+	// (not when a MAC sits on two ports: each row's own time is the dump's)
+	if (fdb_last && tb.sig != null && !tb.multi && fdb_last.sig === tb.sig && now - fdb_last.at < FDB_DUMP_S)
+		return map(fdb_last.hosts, h => {
+			let a = (h.seen != null && fdb_le != null) ? tb.ages[h.bridge + '|' + h.mac] : null;
+
+			return { mac: h.mac, port: h.port, bridge: h.bridge, vlan: h.vlan, seen: a ? int(a[fdb_le ? 0 : 1] / 100) : h.seen };
+		});
 
 	let fdb = rtnl.request(rtnl.const.RTM_GETNEIGH, rtnl.const.NLM_F_DUMP, { family: rtnl.const.AF_BRIDGE });
 	let out = [], per = {};
@@ -465,14 +657,84 @@ function wired() {
 		per[n.dev] = (per[n.dev] ?? 0) + 1;
 
 		let upd = n.cacheinfo?.updated;
+		let heard = !(n.state & rtnl.const.NUD_NOARP) && type(upd) == 'int' && upd >= 0;
 
 		push(out, {
 			mac,
 			port: n.dev,
 			bridge: n.master,
 			vlan: (type(n.vlan) == 'int' && n.vlan > 0 && n.vlan < 4095) ? n.vlan : null,
-			seen: (!(n.state & rtnl.const.NUD_NOARP) && type(upd) == 'int' && upd >= 0) ? int(upd / 100) : null
+			seen: heard ? int(upd / 100) : null
 		});
+
+		// brforward's byte order: the reading nearer the dump's own
+		let a = (heard && fdb_le == null) ? tb.ages[n.master + '|' + mac] : null;
+
+		if (a && a[0] != a[1]) {
+			let dl = a[0] - upd, db = a[1] - upd;
+
+			fdb_le = (dl < 0 ? -dl : dl) <= (db < 0 ? -db : db);
+		}
+	}
+
+	fdb_last = (type(fdb) == 'array') ? { at: now, sig: tb.sig, hosts: out } : null;
+
+	return out;
+}
+
+// [ { family, dev, metric } ] for the families whose lookup answers with
+// a unicast default route in the main table (no dst), IPv4 then IPv6; dev
+// null over several next hops (multipath, no single oif). null when a
+// lookup could not be sent; false is the kernel's error, for a lookup that
+// there is no route (ENETUNREACH), so that family is left out.
+function routes() {
+	let out = [];
+
+	for (let q in [ { family: rtnl.const.AF_INET, dst: PROBE4 }, { family: rtnl.const.AF_INET6, dst: PROBE6 } ]) {
+		let r = rtnl.request(rtnl.const.RTM_GETROUTE, 0, { family: q.family, dst: q.dst, flags: rtnl.const.RTM_F_FIB_MATCH });
+
+		if (r === null)
+			return null;
+
+		if (type(r) != 'object' || r.family != q.family || r.dst != null || r.table != rtnl.const.RT_TABLE_MAIN || r.type != rtnl.const.RTN_UNICAST)
+			continue;
+
+		let m = r.priority ?? 0;
+
+		push(out, { family: (q.family == rtnl.const.AF_INET) ? 4 : 6, dev: netdev(r.oif), metric: (type(m) == 'int' && m >= 0) ? m : 0 });
+	}
+
+	return out;
+}
+
+/* ------------------------------------------------------------- survey */
+
+// The channel survey of one Wi-Fi interface: [ { mhz, noise } ] for each
+// channel the driver reports with a noise value (dBm, a signed byte as
+// NL80211 carries it; 0 is "none"), at most MAX_SURVEY. Asked of the
+// kernel only for an interface cfg80211 drives (its phy80211 link): any
+// other device would be refused by the kernel anyway, and is not asked.
+// The reply of a dump is an array of messages; null when it had none or
+// failed, false when it was cut short.
+function survey(dev) {
+	let out = [];
+
+	if (!netdev(dev) || dev == '.' || dev == '..' || !access(NET + '/' + dev + '/phy80211'))
+		return out;
+
+	let res = nl80211.request(nl80211.const.NL80211_CMD_GET_SURVEY, nl80211.const.NLM_F_DUMP, { dev });
+
+	for (let m in ((type(res) == 'array') ? res : ((type(res) == 'object') ? [ res ] : []))) {
+		let s = (type(m) == 'object' && type(m.survey_info) == 'object') ? m.survey_info : null;
+		let mhz = s?.frequency, noise = s?.noise;
+
+		if (type(mhz) != 'int' || mhz <= 0 || mhz > MAX_MHZ || type(noise) != 'int' || noise == 0 || noise < -128 || noise > 127)
+			continue;
+
+		push(out, { mhz, noise });
+
+		if (length(out) >= MAX_SURVEY)
+			break;
 	}
 
 	return out;
@@ -489,8 +751,8 @@ function switch_port(v) {
 function vlan_ports(sw, list, vid) {
 	let devs = [], members = [];
 
-	for (let t in split(list, /\s+/)) {
-		let m = match(t, /^([0-9]{1,2})([t*]?)$/);
+	for (let t in split(list, RE_SPACES)) {
+		let m = match(t, RE_SWITCH_PORT);
 		let num = m ? switch_port(+m[1]) : null;
 
 		if (num == null || length(members) >= 64)
@@ -523,7 +785,7 @@ function switches() {
 	catch (e) { return out; }
 
 	for (let name, sw in ((type(board?.switch) == 'object') ? board.switch : {})) {
-		if (!match(name, /^[A-Za-z0-9_.-]{1,32}$/) || type(sw?.ports) != 'array')
+		if (!match(name, RE_SWITCH) || type(sw?.ports) != 'array')
 			continue;
 
 		let ports = {}, cpu = {};
@@ -539,7 +801,7 @@ function switches() {
 			else
 				ports[num] = {
 					num,
-					role: (type(p.role) == 'string' && match(p.role, /^[a-z0-9]{1,16}$/)) ? p.role : null,
+					role: (type(p.role) == 'string' && match(p.role, RE_ROLE)) ? p.role : null,
 					index: (type(p.index) == 'int' && p.index >= 0 && p.index < 100) ? p.index : null
 				};
 		}
@@ -557,7 +819,7 @@ function switches() {
 		nw.foreach(NETWORK, 'switch_vlan', (s) => {
 			let sw = (type(s.device) == 'string') ? known[s.device] : null;
 			let id = s.vid ?? s.vlan;
-			let vid = (type(id) == 'string' && match(id, /^[0-9]{1,4}$/)) ? +id : null;
+			let vid = (type(id) == 'string' && match(id, RE_VID)) ? +id : null;
 
 			if (!sw || vid == null || vid > 4094 || type(s.ports) != 'string')
 				return;
@@ -580,7 +842,7 @@ function switches() {
 			continue;
 
 		for (let r in sw.roles) {
-			let m = (type(r?.device) == 'string' && type(r.ports) == 'string') ? match(r.device, /^[A-Za-z0-9_-]{1,10}\.([0-9]{1,4})$/) : null;
+			let m = (type(r?.device) == 'string' && type(r.ports) == 'string') ? match(r.device, RE_VLAN_DEV) : null;
 			let vid = m ? +m[1] : null;
 			let v = (vid != null && vid <= 4094) ? vlan_ports(sw, r.ports, vid) : null;
 
@@ -590,6 +852,97 @@ function switches() {
 	}
 
 	return out;
+}
+
+/* ---------------------------------------------------------------- fwx */
+
+/* fwxd publishes one ubus method, fwx common, and dispatches on an `api`
+   name inside the request. These are the calls made by
+   luci-app-fwx-dashboard/luasrc/controller/fwx_dashboard.lua's
+   get_dashboard_all(), kept in the same order with the same empty
+   fallbacks, so the Vantage tile renders the data the old dashboard
+   showed, plus the per-MAC rates the Clients tile needs (the tile itself
+   lists no terminals). The plugin's own ubus connection is unrestricted,
+   so the browser needs no grant on fwx common itself: the ACL gate is the
+   luci.vantage `fwx` method. fwxd's 007-object-snapshot.patch makes
+   cache hits share a response object, so these reads do not repeat the
+   collection work. */
+const FWX_OK = 2000;          /* API_CODE_SUCCESS in fwxd/src/fwx.h */
+
+function fwx_api(conn, api, data) {
+	let reply;
+
+	/* A missing fwxd is not an error worth logging: an image without the
+	   FCM daemon simply has no fwx tile data. ubus call() reports an
+	   unknown object as a failed call on most builds and may throw on
+	   older ones, so accept both. */
+	try {
+		reply = conn.call('fwx', 'common', {
+			api: api,
+			CopyRight: 'www.fanchmwrt.com',
+			data: data
+		});
+	}
+	catch (e) {
+		return null;
+	}
+
+	if (type(reply) != 'object' || reply.code != FWX_OK || type(reply.data) != 'object')
+		return null;
+
+	return reply.data;
+}
+
+/* get_active_users -> { "mac": [ up, down ] }, both in bytes/s, as fwxd
+   reports them: fwx.ko counts each client's routed bytes in netfilter and
+   samples them every 2 s, fwxd refreshes its copy every 10 s. Only the two
+   numbers travel: the full user objects are mostly fields the Clients tile
+   never draws. A MAC is keyed as fwxd writes it (lower case, colons); the
+   caller normalises. */
+function fwx_rates(reply) {
+	let out = {};
+
+	if (type(reply) != 'object' || type(reply.users) != 'array')
+		return out;
+
+	for (let u in reply.users) {
+		if (type(u) != 'object' || type(u.mac) != 'string' || !length(u.mac))
+			continue;
+
+		out[u.mac] = [
+			type(u.up_rate) == 'int' ? u.up_rate : 0,
+			type(u.down_rate) == 'int' ? u.down_rate : 0
+		];
+	}
+
+	return out;
+}
+
+function fwx_dashboard() {
+	let conn = connect();
+	if (!conn)
+		return { ok: false, error: 'no-ubus' };
+
+	/* Without fwxd there is nothing to show: fail before the other three
+	   calls, and keep no cached state between requests. */
+	let common = fwx_api(conn, 'get_dashboard_common', {});
+	if (!common)
+		return { ok: false, error: 'no-fwx' };
+
+	return {
+		ok: true,
+		common: common,
+		top_users: fwx_api(conn, 'get_daily_top_users', {}) ||
+			{ total_count: 0, users: [] },
+		app_stats: {
+			hourly: fwx_api(conn, 'get_global_app_type_stats', { type: 'hourly', limit: 10 }) ||
+				{ total_count: 0, types: [] },
+			daily: fwx_api(conn, 'get_global_app_type_stats', { type: 'daily', limit: 10 }) ||
+				{ total_count: 0, types: [] }
+		},
+		/* count 100 is fwxd's own ceiling: every client it knows */
+		rates: fwx_rates(fwx_api(conn, 'get_active_users', { count: 100 }))
+	};
 }
 
 /* ------------------------------------------------------------ methods */
@@ -606,7 +959,7 @@ const methods = {
 				return wireless_from_config();
 
 			for (let name, r in reply)
-				if (type(r) == 'object' && match(name, /^[A-Za-z0-9_.-]{1,64}$/))
+				if (type(r) == 'object' && match(name, RE_NAME))
 					out[name] = reduce_radio(r);
 
 			return out;
@@ -631,10 +984,36 @@ const methods = {
 		}
 	},
 
+	routes: {
+		call: function() {
+			return { routes: routes() };
+		}
+	},
+
+	survey: {
+		args: { device: 'device' },
+		call: function(request) {
+			return { results: survey(request.args?.device) };
+		}
+	},
+
+	fwx: {
+		call: function() {
+			return fwx_dashboard();
+		}
+	},
+
 	set_alias: {
 		args: { mac: 'mac', name: 'name', icon: 'icon' },
 		call: function(request) {
 			return set_alias(request.args);
+		}
+	},
+
+	set_quiet: {
+		args: { mac: 'mac', quiet: true },
+		call: function(request) {
+			return set_quiet(request.args);
 		}
 	}
 };

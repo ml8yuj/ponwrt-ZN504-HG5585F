@@ -11,7 +11,7 @@
 
 本项目基于上游 [PonWrt](https://github.com/pbs05/ponwrt)（ImmortalWrt / Linux `6.18`），针对采用 **达发 Airoha AN7581 (4核 Cortex-A53 @ 1.2GHz + 8核 RISC-V NPU)** 主控的双旗舰机型进行深度工程化定制、硬件驱动加速与内核网络栈增强：
 * **兆能 ZN504XG-D (`znxt_zn504xg-d`)**：纯有线 2.5G 高性能光猫（EN8811H 2.5G 网口 + 3×千兆）；
-* **烽火 HG5585F 电信版 (`fiberhome_hg5585f-ct`)**：带 Wi-Fi 6 光猫（Airoha AN7581 + MT7916D DBDC AX3000 + NPU WED 硬件加速，标准原生 USB 2.0 硬件配置）。
+* **烽火 HG5585F 电信版 (`fiberhome_hg5585f-ct`)**：带 Wi-Fi 6 光猫（Airoha AN7581 + MT7916D DBDC AX3000 + 4核中断亲和智能调度，标准原生 USB 2.0 硬件配置）。
 
 每次发布均**同时自动化编译并提供两款机型的固件包**！
 
@@ -24,7 +24,7 @@
 | 核心功能 / 优化维度 | 上游公版 & 社区现状 (痛点) | 本项目聚合增强版 (独家根治与实测收益) |
 | :--- | :--- | :--- |
 | **IPTV 1302 鉴权根治** | ❌ 组播口与业务口共用网桥，动态 MAC 学习引发 FDB 翻转单播黑洞；社区多仅重启或转单播 | ✅ **独家补丁 `03-pon-userspace-iptv`**：组播口 `learning=0` + 动态探测业务口 BNG MAC 并静态固化，**彻底根除 1302 超时与黑洞，切台秒开** |
-| **HG5585F 满血 Wi-Fi 6** | ❌ 缺 EEPROM 提取与 WED 固件；无 NPU 直转加速，软中断全挤在 Core 0，测速仅 500~670M | ✅ **集成 MT7916D + 8核 NPU WED 1200M 驱动**，中断均衡绑定 4 核，**实测 5G 达 1144M 下行 / 1200M 上行**，软中断零积压 |
+| **HG5585F 满血 Wi-Fi 6** | ❌ 缺 EEPROM 提取与射频校准；软中断挤死 Core 0（跑满即 100% 单核假死），测速仅 500~670M | ✅ **MT7916D 满血驱动 + 独家 4 核中断亲和调度**：`pin-wifi-cpus.sh` 将收发与 NAPI 线程精准均衡至 4 核，突破单核瓶颈，**实测 5G 突破 770~1100+ Mbps**，软中断零积压 |
 | **PON 参数跨固件防丢** | ❌ 升级固件默认冲刷覆盖 `/etc/config/pon`，未手动保存直接失联变砖；社区需登录 SSH 手动备份 | ✅ **内置一键备份/还原脚本**，开机自动生成并注入系统升级白名单，**无感保留 LOID、SN、MAC 与宽带账号**，升级零丢配置 |
 | **NNdroid OLT 局端防掉线** | ❌ 缺激光冷机防抖，偶发误报 `SYS_TX_READY` 被局端秒踢；华为等 OLT 报 `reason=0x01` 难以定位 | ✅ **集成 EN7572 激光冷启动 8 次采样闭锁保护**；支持 Web 自由切换 LOID 补零；状态页直显 16 进制报文，**冷启动 100% 稳出光** |
 | **QWRT 16MB 网络缓冲** | ⚠️ 内核默认 2MB 缓冲，队列深度低，高并发 BT/多任务时交换芯片 CDM 队列易溢出丢包 | ✅ **对齐 QWRT 16MB (`16777216`) TCP/UDP 核心缓冲**，队列深度扩至 16384，内存防碎片，**彻底消除 CDM 突发溢出丢包** |
@@ -32,7 +32,7 @@
 | **开箱即用 br-iptv 代理** | ❌ 无预置网桥与代理，需自行抓包建桥；旧版单栈 udpxy 易引发二层组播环路反射与端口占用 | ✅ **预置隔离网桥 `br-iptv`（`isolate=1, learning=0`）**，集成 `rtp2httpd` 端口 4022 多核并发零拷贝，附带 Web 播放器，**全屋网页秒开** |
 | **双栈硬件流卸载 (PPE)** | ⚠️ 常见固件缺少网桥卸载补丁导致下行卸载率仅 17%；IPv6 PPPoE 严重丢包卡死，迫使用户关闭加速 | ✅ **独家补丁 931/932 修复 AN7581 PPE 缺陷与网桥从端口卸载**：实现 IPv4+IPv6 双栈 100% 直转，**千兆满速 CPU 仅 ~4%，下行硬件卸载率飙升至 90%+** |
 | **纯净硬件加解密优化** | ⚠️ 保留 SafeXcel / EIP-93 协处理器驱动，诱发 Crypto API 优先级霸凌、DMA 性能倒挂与锁争用 | ✅ **彻底剔除 `kmod-crypto-hw-eip93` 负优化**，释放 4 核 1.2GHz ARMv8 NEON 向量直算，**小包 DMA 刷脏归零，WireGuard/Sing-Box 吞吐更稳** |
-| **Sing-Box 原生 NFQUEUE** | ❌ 缺失 `kmod-nft-queue` 驱动，开 `auto_redirect` 必崩溃；依赖脆弱易冲突的自定义脚本 | ✅ **内核原生集成 Netfilter NFQUEUE 驱动与最新 `sing-box 1.15.0-alpha.13`** 与 Momo 核心模式，**原生 TUN 模式零拷贝透明网关重定向** |
+| **Sing-Box 原生 NFQUEUE & Honk eBPF** | ❌ 缺失 `kmod-nft-queue` 与 `kmod-veth` 驱动，开透明代理必崩溃；依赖脆弱易冲突的自定义脚本 | ✅ **内核原生集成 `kmod-veth`、NFQUEUE 与最新 `sing-box 1.15.0-alpha.13` + `honk 0.1.0-beta.6`**，**原生 TUN 模式与 eBPF 零拷贝双核透明网关** |
 | **现代化 CI/CD 流水线** | ⚠️ 基础单任务无编译器指纹匹配，依赖易超时，编译动辄 2~4 小时且网络波动易断流 | ✅ **Ubuntu 24.04 + Node 24 + CCACHE 编译器指纹匹配**，5GB 增量编译缓存与多镜像测速回退，**构建大幅缩短至 20~35 分钟，成功率 99%+** |
 
 ---
@@ -137,9 +137,9 @@
 
 ---
 
-### 2. ⚡ 烽火 HG5585F Wi-Fi 6 + NPU WED 硬件加速满血 1200M
+### 2. ⚡ 烽火 HG5585F Wi-Fi 6 满血驱动与独家 4 核中断亲和调度机制
 
-* **MT7916D + 8核 NPU WED 直转**：预置 `en7581_MT7916_npu_rv32.bin` 与 `en7581_MT7916_npu_data.bin`，由达发 8 核 RISC-V NPU 直接接管无线 RX DMA 与 WED TX 数据通路，实现无线与有线之间零 CPU 占用线速转发。
+* **MT7916D 满血驱动与 NPU 辅助支持**：完整预置 `en7581_MT7916_npu_rv32.bin` 与 `en7581_MT7916_npu_data.bin` 等 NPU 辅助固件，协同主控底层处理。针对当前开源主线 AN7581 与 mt76 尚未打通纯硬件 WED 直转的现状，独创采用四核智能中断亲和架构，彻底破解开源公版“单核软中断被打满、测速被卡在 500~600M”的瓶颈。
 * **工厂 EEPROM 校准自动提取**：内置 `/etc/hotplug.d/firmware/10-mt7916-an-eeprom` 与 `/etc/init.d/mt7916-an-eeprom`（在 `kmodloader` 加载驱动前于 `START=08` 执行），开机自动从 UBI `factory` 分区的 `0x1000` 偏移处提取 4KB 射频校准数据，校验 `0x7916` 硬件魔数并无缝提供给驱动。
 * **独立 MAC 地址算号机制**：内置 `/lib/preinit/07_an7581_bsp_wifi_mac`，开机预初始化阶段自动从 `factory` 分区读取基准 MAC 并计算 2.4G (`base + 6`) 与 5G (`base + 7`) 独立合法硬件地址。
 * **射频功率校准表**：预置 `SingleSKU` 与 `mt7916-sku.dat` / `mt7916-sku-bf.dat` 波束成形数据。
@@ -152,10 +152,10 @@
 
 ---
 
-### 3. 🛡️ PON 认证参数与 Momo 订阅跨固件升级自动备份还原
+### 3. 🛡️ PON 认证参数与透明代理订阅跨固件升级自动备份还原
 
 * **一键提取与恢复脚本**：内置 `/usr/sbin/backup-fiberhome-pon.sh` 与 `/usr/sbin/restore-fiberhome-pon.sh`，一键提取并校验 `FHTT`、`HG5585FV1.0`、LOID、PON SN 及设备标识。
-* **开机自动守护**：首次启动或配置变更时，系统自动维护 `/etc/sysupgrade.conf` 白名单，将 `/etc/config/pon`、`/etc/fiberhome_pon_backup.uci`、Momo 自启脚本与配置文件永久纳入保护清单。
+* **开机自动守护**：首次启动或配置变更时，系统自动维护 `/etc/sysupgrade.conf` 白名单，将 `/etc/config/pon`、`/etc/fiberhome_pon_backup.uci`、Sing-Box/Honk 配置文件与管理脚本永久纳入保护清单。
 * **升级零丢失**：后续无论通过 Web 界面还是 SSH 命令行执行 `sysupgrade`，原有的运营商认证信息与透明代理规则均完整保留，告别刷机后断网变砖。
 
 ---
@@ -208,7 +208,7 @@
 * **Ubuntu 24.04 镜像源动态探活与测速回退**：
   构建启动时自动探测 Kernel.org、US Archive、Rackspace、Princeton、Ubuntu Archive、Azure 等多组权威镜像站，以并发毫秒级探活选取最快存活源自动改写 `sources.list`，彻底终结 GitHub Actions 偶发 APT 更新超时报错。
 * **yq 现代化 YAML/JSON 处理工具链集成**：
-  原生集成 `yq` 工具，无缝支持 IPTV 业务配置文件、Momo/Sing-box 订阅复杂语法的动态改写与自动化转换。
+  原生集成 `yq` 工具，无缝支持 IPTV 业务配置文件、Honk/Sing-box 订阅复杂语法的动态改写与自动化转换。
 
 ---
 
@@ -484,12 +484,12 @@ make -j$(nproc) || make -j1 || make -j1 V=s
 - **[1018ji/build-ponwrt-daily](https://github.com/1018ji/build-ponwrt-daily)**：现代化 CI 构建流水线开创者，提供基于编译器版本指纹的 Ccache 高速缓存持久化（`CCACHE_COMPILERCHECK`）、5GB 增量缓存复用与镜像源动态测速回退的架构灵感。
 - **[LeoooChen/PonWRT-TYFZA1](https://github.com/LeoooChen/PonWRT-TYFZA1)**：硬件流量转发与 16MB 环形缓冲区调优先驱，贡献 XG-PON 线路与 PPPoE 线速流量硬件卸载（4.5% 超低 CPU 占用）实践及 `rpcd` 异步无线扫描防卡死机制。
 - **[Kahen/PonWrt-CI-UBI](https://github.com/Kahen/PonWrt-CI-UBI)**：提供 AN7581 SoC 精确温度遥测方案 (`temperature-rpc.uc` 与 LuCI RPC 联动) 及 MTD 读写保护 (`kmod-mtd-rw`)。
-- **[ImmortalWrt](https://github.com/immortalwrt/immortalwrt) & QWRT 项目团队**：为 Linux 网络内核调优、EIP-93 硬件协处理器剔除性能倒挂实践、PPE 硬件流表加速与 Wi-Fi WED 硬件直转提供深度参考与优秀范例。
+- **[ImmortalWrt](https://github.com/immortalwrt/immortalwrt) & QWRT 项目团队**：为 Linux 网络内核调优、EIP-93 硬件协处理器剔除性能倒挂实践、PPE 硬件流表加速与网络调优提供深度参考与优秀范例。
 - **[NNdroid](https://github.com/NNdroid)**：提供 EN7572 激光冷启动防抖确认补丁、LOID 填充方向调节及 CTC 原始报文分析回显工具链。
 - **[OpenWrt Project](https://github.com/openwrt/openwrt)**：为全球网络设备提供坚实、可扩展的嵌入式 Linux 操作系统底座。
 - **[stackia/rtp2httpd](https://github.com/stackia/rtp2httpd)**：高性能零拷贝 4K/8K IPTV 组播转单播、FCC 快速切台与 RTSP 代理引擎，附带现代 Web 播放器与状态监控面板。
 - **[SagerNet/sing-box](https://github.com/SagerNet/sing-box)**：新一代高性能网络代理核心。
-- **[nikkinikki-org/OpenWrt-momo](https://github.com/nikkinikki-org/OpenWrt-momo)**：极简高效的 OpenWrt sing-box 透明网关前端与控制面板。
+- **[daeuniverse/honk](https://github.com/daeuniverse/honk)** 与 **[daeuniverse/openwrt-packages](https://github.com/daeuniverse/openwrt-packages)**：高性能 Linux eBPF 零拷贝透明代理引擎与 LuCI Web 控制面板。
 - **[rchen14b/luci-app-airoha-npu](https://github.com/rchen14b/luci-app-airoha-npu)**：达发 AN7581 独立 8 核 RISC-V NPU / PPE 运行状态与硬件流表监控看板。
 - **[VizzleTF/luci-theme-footstrap](https://github.com/VizzleTF/luci-theme-footstrap)**：专为 PonWrt 适配的清爽现代响应式主题。
 - **[oenhu](https://github.com/oenhu)**：贡献 PR #116 优化，避免 DHCP 网络冗余生成 `wan6` 接口引起的路由竞争。

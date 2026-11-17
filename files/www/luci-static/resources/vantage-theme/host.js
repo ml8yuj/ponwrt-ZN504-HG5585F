@@ -2,5 +2,7 @@
 function looksLikeReference(model){const m=clean(model);return!m||REFERENCE.test(m);}
 function vendorName(v){const key=v.toLowerCase();if(Object.prototype.hasOwnProperty.call(VENDORS,key))return VENDORS[key];return key.split(/[-_]+/).filter(Boolean).map(w=>w.charAt(0).toUpperCase()+w.slice(1)).join(' ');}
 function fromBoardName(boardName){const b=clean(boardName);const i=b.indexOf(',');if(i<=0||i===b.length-1)return null;const vendor=b.slice(0,i).trim(),model=b.slice(i+1).trim();if(!/^[A-Za-z0-9._-]+$/.test(vendor)||!/^[A-Za-z0-9._+,-]+$/.test(model))return null;return vendorName(vendor)+' '+model.replace(/,/g,' ').toUpperCase();}
+function nameKey(s){return clean(s).toLowerCase().replace(/[^\p{L}\p{N}]+/gu,'');}
+function chipNames(hostname,product){const h=clean(hostname),p=clean(product);const hk=nameKey(h),pk=nameKey(p);if(!p||(h&&pk&&hk.indexOf(pk)>=0))return h?[h]:[];if(!h||(hk&&pk.indexOf(hk)>=0))return[p];return[h,p];}
 function productName(board){if(!board||typeof board!=='object')return'';const model=clean(board.model);if(model&&!looksLikeReference(model))return model;return fromBoardName(board.board_name)||clean(board.board_name);}
-return baseclass.extend({productName,fromBoardName,looksLikeReference});
+return baseclass.extend({productName,chipNames,fromBoardName,looksLikeReference});

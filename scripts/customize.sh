@@ -7,7 +7,7 @@ set -euo pipefail
 # - QWRT Optional: Samba4, GecoosAC, WOL Ultra
 # - Kahen Essence: Temperature RPC (/sbin/tempinfo), Footstrap Theme, Clean Feeds
 # - LeoooChen Essence: Line-rate PPPoE / XG-PON offload & High Throughput Buffers
-# - Momo & Sing-Box: OpenWrt-momo with Chinese Translation and 128MB Memory Limit
+# - Sing-Box & Honk: Dual-engine transparent proxy architecture
 
 echo "=== [PonWrt-ZN504] Preparing build dependencies and custom packages ==="
 
@@ -19,13 +19,9 @@ else
     echo "[OK] luci-app-airoha-npu is present"
 fi
 
-# 2. 确保 nikkinikki OpenWrt-momo (Momo + sing-box 核心) 处于可用状态
-if [ ! -d "./package/luci-app-momo" ]; then
-    echo "--> Cloning OpenWrt-momo..."
-    git clone --depth 1 https://github.com/nikkinikki-org/OpenWrt-momo.git ./package/luci-app-momo
-else
-    echo "[OK] luci-app-momo is present"
-fi
+# 2. 清理历史遗留 Momo 组件（全面切换至裸核 Sing-Box 与 Honk eBPF 双核方案）
+rm -rf ./package/luci-app-momo 2>/dev/null || true
+echo "[OK] Momo package removed, Sing-Box & Honk ready"
 
 # 3. 集成 Kahen 精华：luci-theme-footstrap (轻量响应式主题)
 if [ ! -d "./package/luci-theme-footstrap" ]; then

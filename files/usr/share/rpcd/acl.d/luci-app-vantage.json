@@ -1,6 +1,6 @@
 {
 	"luci-app-vantage": {
-		"description": "Vantage dashboard: read-only status of the device, uplink, radios and stations (wireless configuration without keys, through luci.vantage wireless), its temperature sensors (luci.vantage thermal), the wired hosts its bridges have learned (luci.vantage wired: MAC, port and when last heard, and which switch ports a port's VLAN has) and the link state of those switch ports (luci getSwconfigPortState)",
+		"description": "Vantage dashboard: read-only status of the device, uplink, radios and stations (wireless configuration without keys, through luci.vantage wireless), its temperature sensors (luci.vantage thermal), the wired hosts its bridges have learned (luci.vantage wired: MAC, port and when last heard, and which switch ports a port's VLAN has), the link state of those switch ports (luci getSwconfigPortState), the default route the kernel takes to the internet (luci.vantage routes: family, device and metric, no gateways), each radio's noise floor (luci.vantage survey: the channel survey read through nl80211), and fwxd's dashboard counters (luci.vantage fwx: active apps, hosts, users, app category durations and today's traffic; the plugin calls fwx common itself, no browser grant on that object)",
 		"read": {
 			"file": {
 				"/proc/stat": [ "read" ]
@@ -12,7 +12,7 @@
 				"network.device": [ "status" ],
 				"luci-rpc": [ "getHostHints" ],
 				"luci": [ "getSwconfigPortState" ],
-				"luci.vantage": [ "thermal", "wired", "wireless" ],
+				"luci.vantage": [ "routes", "survey", "thermal", "wired", "wireless", "fwx" ],
 				"iwinfo": [ "assoclist", "info" ],
 				"hostapd.*": [ "get_clients", "get_status" ],
 				"umdns": [ "hosts" ],
@@ -30,7 +30,7 @@
 		}
 	},
 	"luci-app-vantage-names": {
-		"description": "Vantage dashboard: name stations (luci.vantage set_alias: validated names in /etc/config/vantage only, at most 512)",
+		"description": "Vantage dashboard: name stations and keep a station's weak signal out of the warnings (luci.vantage set_alias and set_quiet: validated names and quiet MACs in /etc/config/vantage only, at most 512 each)",
 		"read": {
 			"ubus": {
 				"uci": [ "get" ]
@@ -39,7 +39,7 @@
 		},
 		"write": {
 			"ubus": {
-				"luci.vantage": [ "set_alias" ]
+				"luci.vantage": [ "set_alias", "set_quiet" ]
 			}
 		}
 	}
