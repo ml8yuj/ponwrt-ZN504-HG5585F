@@ -1,0 +1,187 @@
+name: Build PonWrt HG5382A trimmed
+
+# 目的：在 181 补丁（含 IPv6 断流修复 932 / 951-01 / 951-02）基础上，把产物压到
+# UBI fit 卷容量以内（230 LEB = 29,204,480 字节 / 27.8MiB）。
+#
+# 实测新版 rootfs 解压 128MB、压缩 39.6MB，比旧版多出的 55MB 全部来自：
+#   usr/bin/honk-core        29.9 MB   <- CONFIG_PACKAGE_honk / luci-app-honk
+#   usr/share/v2ray/geoip.dat 22.8 MB  <- CONFIG_PACKAGE_v2ray-geoip
+#   usr/share/v2ray/geosite.dat 2.3 MB <- CONFIG_PACKAGE_v2ray-geosite
+# 另加 usr/bin/yq 14.2MB 与内核 BTF 调试信息 ~1.8MB。
+# 本机是桥接光猫，不做任何代理，以上全部无关，删除不影响 IPv6 行为。
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CCACHE_COMPILERCHECK: '%compiler% -dumpmachine; %compiler% -dumpversion'
+  CCACHE_MAXSIZE: 5G
+
+jobs:
+  build:
+    name: Build fiberhome_hg5382a trimmed
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Free build space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache || true
+          sudo docker image prune --all --force 2>/dev/null || true
+          sudo apt-get clean
+
+      - name: Install build dependencies
+        run: |
+          sudo DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get install -y --no-install-recommends \
+            asciidoc autoconf automake autopoint binutils bison build-essential \
+            bzip2 ccache clang cmake cpio curl device-tree-compiler flex gawk \
+            gettext git g++-multilib gcc-multilib gperf help2man intltool \
+            libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev \
+            libmpfr-dev libncurses-dev libpython3-dev libreadline-dev libssl-dev \
+            libtool libyaml-dev lld llvm ninja-build p7zip-full patch pkgconf \
+            python3 python3-docutils python3-pip python3-ply python3-pyelftools \
+            qemu-utils re2c rsync scons squashfs-tools subversion swig texinfo \
+            uglifyjs unzip wget xmlto xxd zlib1g-dev zstd
+
+      - name: Cache downloads
+        uses: actions/cache@v4
+        with:
+          path: dl
+          key: ponwrt-dl-hg5382a-${{ hashFiles('feeds.conf.default', 'configs/*.config') }}
+          restore-keys: |
+            ponwrt-dl-hg5382a-
+            ponwrt-dl-zn504-
+
+      - name: Update and install feeds
+        run: |
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Prepare custom packages
+        run: bash ./scripts/customize.sh
+
+      - name: Restore compiler ccache
+        uses: actions/cache/restore@v4
+        with:
+          path: .ccache
+          key: ponwrt-ccache-hg5382a-trim-${{ hashFiles('configs/*.config') }}-${{ github.sha }}
+          restore-keys: |
+            ponwrt-ccache-hg5382a-trim-
+            ponwrt-ccache-hg5382a-slim-
+            ponwrt-ccache-hg5382a-
+
+      - name: Configure for HG5382A only (trimmed)
+        run: |
+          ./scripts/kconfig.pl + configs/an7581.config configs/release.config > .config
+
+          grep -v '^CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_' .config > .config.tmp && mv .config.tmp .config
+          grep -v '^# CONFIG_TARGET_airoha_an7581_DEVICE_' .config > .config.tmp && mv .config.tmp .config
+
+          cat >> .config <<'EOF'
+          CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_fiberhome_hg5382a=y
+          CONFIG_TARGET_DEVICE_PACKAGES_airoha_an7581_DEVICE_fiberhome_hg5382a=""
+          # HG5382A 无 Wi-Fi
+          # CONFIG_PACKAGE_kmod-mt7915e is not set
+          # CONFIG_PACKAGE_kmod-mt7916-firmware is not set
+          # CONFIG_PACKAGE_znxt-zn515-mt7916-eeprom is not set
+          # CONFIG_PACKAGE_kmod-cfg80211 is not set
+          # CONFIG_PACKAGE_kmod-mac80211 is not set
+          # CONFIG_PACKAGE_wpad-openssl is not set
+          # CONFIG_PACKAGE_wireless-regdb is not set
+          # CONFIG_PACKAGE_iw is not set
+          # CONFIG_PACKAGE_iwinfo is not set
+          # 2.5G 口是外置 MaxLinear GPY211
+          # CONFIG_PACKAGE_airoha-en8811h-firmware is not set
+          CONFIG_PACKAGE_kmod-phy-maxlinear=y
+          CONFIG_PACKAGE_kmod-phy-realtek=y
+          # ---- 裁剪 1：关闭内核调试信息（BTF 使 kmods 带 DWARF）----
+          # CONFIG_KERNEL_DEBUG_INFO is not set
+          # CONFIG_KERNEL_DEBUG_INFO_REDUCED is not set
+          # CONFIG_KERNEL_DEBUG_INFO_BTF is not set
+          # CONFIG_KERNEL_DEBUG_INFO_BTF_MODULES is not set
+          # CONFIG_KERNEL_GDB_SCRIPTS is not set
+          # ---- 裁剪 2：代理内核与地理库（本机桥接，不做代理）----
+          # CONFIG_PACKAGE_honk is not set
+          # CONFIG_PACKAGE_luci-app-honk is not set
+          # CONFIG_PACKAGE_luci-lib-daeuniverse is not set
+          # CONFIG_PACKAGE_luci-i18n-daeuniverse-zh-cn is not set
+          # CONFIG_PACKAGE_dae is not set
+          # CONFIG_PACKAGE_daeuniverse-pkg is not set
+          # CONFIG_PACKAGE_sing-box is not set
+          # CONFIG_PACKAGE_sing-box-tiny is not set
+          # CONFIG_PACKAGE_v2ray-geoip is not set
+          # CONFIG_PACKAGE_v2ray-geosite is not set
+          # CONFIG_PACKAGE_xray-core is not set
+          # CONFIG_PACKAGE_v2ray-core is not set
+          # CONFIG_PACKAGE_v2ray-plugin is not set
+          # CONFIG_PACKAGE_luci-app-passwall is not set
+          # CONFIG_PACKAGE_luci-app-momo is not set
+          # CONFIG_PACKAGE_momo is not set
+          # CONFIG_PACKAGE_luci-app-openclash is not set
+          # 体积大户，OpenWrt 自带功能不依赖
+          # CONFIG_PACKAGE_yq is not set
+          EOF
+
+          sed -i '/^CONFIG_DEVEL=/d; /^CONFIG_CCACHE=/d' .config
+          printf 'CONFIG_DEVEL=y\nCONFIG_CCACHE=y\n' >> .config
+
+          make defconfig
+
+          echo "=== 生效设备 ==="
+          grep '^CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_.*=y' .config
+          echo "=== 调试信息（应为空）==="
+          grep -E '^CONFIG_KERNEL_DEBUG_INFO' .config || echo "(clean)"
+          echo "=== 代理相关（应为空）==="
+          grep -E '^CONFIG_PACKAGE_(honk|luci-app-honk|dae|daeuniverse-pkg|sing-box|v2ray-geoip|v2ray-geosite|xray-core|v2ray-core|v2ray-plugin|yq)=' .config || echo "(clean)"
+
+      - name: Download package sources
+        run: make download -j"$(nproc)"
+
+      - name: Compile firmware
+        run: |
+          [ -x staging_dir/host/bin/ccache ] && CCACHE_DIR=$PWD/.ccache staging_dir/host/bin/ccache -z || true
+          make -j"$(nproc)" || make -j1 V=s
+
+      - name: Size gate (fit volume limit)
+        run: |
+          ITB=$(ls bin/targets/airoha/an7581/*hg5382a*sysupgrade.itb | head -1)
+          SZ=$(stat -c %s "$ITB")
+          echo "itb: $ITB"
+          echo "itb bytes: $SZ"
+          echo "fit volume limit: 29204480"
+          if [ "$SZ" -gt 29204480 ]; then
+            echo "FAIL: image exceeds UBI fit volume, not flashable"
+            exit 1
+          fi
+          echo "OK: fits with $((29204480 - SZ)) bytes margin"
+
+      - name: Save compiler ccache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: .ccache
+          key: ponwrt-ccache-hg5382a-trim-${{ hashFiles('configs/*.config') }}-${{ github.sha }}
+
+      - name: Collect artifacts
+        run: |
+          mkdir -p output
+          find bin/targets/airoha/an7581/ -type f -name "*hg5382a*" \
+            \( -name "*sysupgrade.itb" -o -name "*recovery.itb" -o -name "*manifest" \) \
+            -exec cp {} output/ \;
+          cd output
+          for f in *; do [ -f "$f" ] && sha256sum "$f" > "$f.sha256"; done
+          echo "=== 产物 ==="; ls -lh
+
+      - name: Upload Firmware Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PonWrt-HG5382A-firmware-trim
+          path: output/*
+          retention-days: 14
