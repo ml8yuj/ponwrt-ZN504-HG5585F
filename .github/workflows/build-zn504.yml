@@ -164,42 +164,26 @@ jobs:
           tag_name: ${{ steps.tag.outputs.release_tag }}
           name: PonWrt ZN504XG-D & HG5585F 聚合增强固件 (${{ steps.tag.outputs.release_tag }})
           body: |
-            ## 🌟 相比前一版本（v2026.11.15-1121）的核心更新与变化
+            ## 🌟 相比前一版本（v2026.11.17-0850）的核心更新与变化
 
-            ### 1. 上游基线同步（pbs05/ponwrt）
-            - **RTL8221B RJ45 LED 低速点亮补丁（PR #119）**：
-              - 合入内核补丁 `762-net-phy-realtek-rtl8221b-led-init.patch`，初始化 RTL8221B PHY 的 `LED_CFG2`/`LCR6` 寄存器，彻底解决网口在 1000M / 100M 低速协商模式下 LED 灯不亮的硬件体验痛点。
-            - **FiberHome AN4475-G2 新机型支持（PR #120）**：
-              - 新增对该 10G PON + FTTR 旗舰机型的设备树与固件构建支持。
-            - **板级调优清理与 Wi-Fi 亲和性固化（PR #117）**：
-              - 规范板级参数定义，正式固化 MT7916 4 核无线软中断亲和调度机制。
+            ### 1. 内核 eBPF CO-RE 与 BTF 类型信息闭环（Linux 6.18）
+            - **完整启用内核与模块 BTF 支持**：
+              - 在 `target/linux/airoha/an7581/config-6.18`、`an7583/config-6.18` 与构建配置中开启 `CONFIG_DEBUG_INFO_BTF=y`、`CONFIG_DEBUG_INFO_BTF_MODULES=y` 及 `CONFIG_BPF_EVENTS=y`，并在 CI 构建链路中集成 `dwarves`（`pahole`）。
+              - 固件原生生成 `/sys/kernel/btf/vmlinux` 与内核模块 BTF 段，开箱支持 `honk` / `dae` 等基于 eBPF CO-RE 的透明代理程序运行。
 
-            ### 2. QWRT 黄金网络栈优化与延迟压制
-            - **网络缓冲与队列扩容**：
-              - 对齐 16MB 核心缓冲区上限，扩容核心网络队列深度（`netdev_max_backlog=10000`），消除高并发 BT 与组播突发丢包。
-            - **P2P / Conntrack 死连接快速回收**：
-              - 调优 `tcp_timeout_established=7440`，设置 16384 连接桶并关闭校验和计算（`nf_conntrack_checksum=0`），显著降低连接跟踪查表开销。
-            - **低延迟 FQ 队列与拥塞控制**：
-              - 默认预置 `default_qdisc=fq` 公平队列，搭配 `tcp_notsent_lowat=16384`、`tcp_slow_start_after_idle=0` 与 `tcp_fastopen=3`，显著压制大流量并发时的网络排队抖动（Jitter）。
-            - **Wi-Fi 硬件流表热插拔防抖**：
-              - 新增 `/etc/hotplug.d/net/50-fw4-bridge-reload` 脚本，在无线 AP 接口（`phy*-ap*`）上线时加锁防抖重载防火墙，确保无线设备加入网桥后第一时间被 PPE 硬件流表 offload 接管。
-            - **FullCone NAT 与局域网 NTP 重定向**：
-              - 防火墙默认启用 FullCone NAT，大幅改善主机与游戏联机 NAT 类型；新增 NTP 重定向规则，内网 UDP 123 校时请求自动劫持至路由器本机 NTP 服务。
+            ### 2. 上游核心驱动与硬件卸载修复集成（源自 `pbs05/ponwrt`）
+            - **桥接流表与 PPE 硬件卸载保护 TTL / IPv6 Hop Limit（PR #82）**：
+              - 合入 `951-01-netfilter-preserve-bridge-fastpath-hop-limits.patch` 与 `951-02-net-airoha-preserve-bridge-ttl.patch`。
+              - 在内核 `nf_flowtable` 与达发 `airoha_ppe` 驱动中区分二层桥接流与三层路由流，禁止硬件流表对 L2 桥接报文错误递减 IPv4 TTL 与 IPv6 Hop Limit，根治开启硬件流卸载后内网 IPv6 异常及 VLAN 桥接（如 IPTV）跳数被误扣的问题。
+            - **AN7581 LAN/WAN 16K SRAM 动态拥塞门限初始化（PR #64）**：
+              - 合入 `947-net-airoha-initialize-lan-sram-congestion.patch` 与 `947-net-airoha-initialize-wan-sram-congestion.patch`。
+              - 为 AN7581 QDMA0 16K SRAM 描述符池初始化官方 SDK 拥塞丢包阈值曲线并激活 250us 硬件动态重算，消除 2.5G 突发至 1G 网口或高并发连接骤停瞬间的硬件队列尾丢包（`P0 CDM1` 拥塞丢包）。
+            - **达发 NPU 固件缓存信息与 IPv6 元数据解析（PR #72）**：
+              - 合入 `941-01-net-airoha-npu-expose-cached-firmware-info.patch` 与 `941-02-net-airoha-decode-ipv6-smac-metadata.patch`，通过 sysfs 暴露只读 NPU 固件版本及核心拓扑，增强 IPv6 硬件转发诊断能力。
+            - **清理失效 APK 软件仓库源（PR #116）**：
+              - 在 `an7581.config` / `an7583.config` 中禁用官方未提供索引的 `video`、`pon_drivers`、`pon_userspace` 源，消除运行 `apk update` 时的 404 报错。
 
-            ### 3. Vantage 1.0.20 现代化仪表盘与 RPCD ACL 权限契约闭环
-            - **Vantage 视图与组件升级至 1.0.20**：
-              - 支持 Wi-Fi 频谱实时侦测（`survey`）、防火墙动态会话拓扑（`fwx`）、内核实时路由拓扑（`routes`）以及终端别名与弱信号静默屏蔽（`set_alias`/`set_quiet`）。
-            - **RPCD ACL 鉴权闭环**：
-              - 补齐 `luci-app-vantage.json` 与 `luci-theme-vantage.json` 权限白名单，彻底根治前端请求 403 权限拒绝导致的组件空白报错。
-
-            ### 4. 内核时钟节拍（250Hz）与低延迟抢占模型（CONFIG_PREEMPT）
-            - **调度延迟微秒级压制**：
-              - 显式取消 generic 默认项（`# CONFIG_HZ_100 is not set`、`CONFIG_HZ=250` 与 `# CONFIG_PREEMPT_NONE is not set`、`CONFIG_PREEMPT=y`）。
-              - 网络定时器精度提升 2.5 倍，高优先级实时小包与游戏流量可随时抢占后台大流量任务，彻底消除缓冲膨胀（Bufferbloat）与跳 Ping。
-
-            ### 5. 架构纯净化与依赖规范
-            - **彻底剔除误入的 airoha-hwnat 闭源驱动依赖**：
-              - 恢复主线原汁原味的高性能内核原生 PPE 架构（补丁 931+932），杜绝 `mt7916_ap.ko` 缺失问题。
-            - **规范 OpenWrt APK v3 软件包版本号**：
-              - 修复连字符命名不规范问题，`honk`（`0.1.0_beta6`）、`luci-app-honk` 与 `kmod-veth` 纯净集成。
+            ### 3. 网络热插拔脚本纯净化
+            - **还原 `98-pppoe-rps` 纯净职责**：
+              - 移除 `/etc/hotplug.d/net/98-pppoe-rps` 中额外附加的硬编码 BT/P2P 端口绕过规则，仅保留核心网卡队列 RPS 多核软中断均衡配置。
           files: output/*
