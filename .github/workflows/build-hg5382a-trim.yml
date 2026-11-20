@@ -7,6 +7,10 @@ name: Build PonWrt HG5382A trimmed
 # 本机是桥接光猫、不做任何代理，删掉不影响 IPv6 行为。
 on:
   workflow_dispatch:
+  push:
+    branches: [ master ]
+
+# trigger bump: 2026-11-20 21:05 CST
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
