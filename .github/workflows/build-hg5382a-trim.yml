@@ -1,14 +1,10 @@
 name: Build PonWrt HG5382A trimmed
 
-# 目的：在 181 补丁（含 IPv6 断流修复 932 / 951-01 / 951-02）基础上，把产物压到
-# UBI fit 卷容量以内（230 LEB = 29,204,480 字节 / 27.8MiB）。
+# 直接构建作者上游 master（wuziwei/ponwrt-ZN504-HG5585F），
+# 本仓库只提供 workflow，不再需要手动 Sync fork。
 #
-# 实测新版 rootfs 解压 128MB、压缩 39.6MB，比旧版多出的 55MB 全部来自：
-#   usr/bin/honk-core        29.9 MB   <- CONFIG_PACKAGE_honk / luci-app-honk
-#   usr/share/v2ray/geoip.dat 22.8 MB  <- CONFIG_PACKAGE_v2ray-geoip
-#   usr/share/v2ray/geosite.dat 2.3 MB <- CONFIG_PACKAGE_v2ray-geosite
-# 另加 usr/bin/yq 14.2MB 与内核 BTF 调试信息 ~1.8MB。
-# 本机是桥接光猫，不做任何代理，以上全部无关，删除不影响 IPv6 行为。
+# 裁剪依据：rootfs 里 55MB 来自 honk-core / geoip / geosite / yq / 内核 BTF，
+# 本机是桥接光猫、不做任何代理，删掉不影响 IPv6 行为。
 on:
   workflow_dispatch:
 
@@ -27,8 +23,18 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      - name: Checkout repository
+      - name: Checkout upstream (author master)
         uses: actions/checkout@v4
+        with:
+          repository: wuziwei/ponwrt-ZN504-HG5585F
+          ref: master
+          fetch-depth: 1
+
+      - name: Show upstream HEAD
+        run: |
+          echo "commit: $(git rev-parse HEAD)"
+          echo "date:   $(git log -1 --format=%ci)"
+          echo "subject: $(git log -1 --format=%s)"
 
       - name: Free build space
         run: |
@@ -149,18 +155,19 @@ jobs:
           [ -x staging_dir/host/bin/ccache ] && CCACHE_DIR=$PWD/.ccache staging_dir/host/bin/ccache -z || true
           make -j"$(nproc)" || make -j1 V=s
 
-      - name: Size gate (fit volume limit)
+      - name: Size report (fit volume auto-sizes on flash)
         run: |
           ITB=$(ls bin/targets/airoha/an7581/*hg5382a*sysupgrade.itb | head -1)
           SZ=$(stat -c %s "$ITB")
           echo "itb: $ITB"
           echo "itb bytes: $SZ"
-          echo "fit volume limit: 29204480"
-          if [ "$SZ" -gt 29204480 ]; then
-            echo "FAIL: image exceeds UBI fit volume, not flashable"
+          echo "fit 卷在刷机时按镜像长度重建（nand.sh: nand_upgrade_prepare_ubi fit_length）"
+          echo "UBI 总空间 259665920 B, 仅作防呆上限 40000000 B"
+          if [ "$SZ" -gt 40000000 ]; then
+            echo "FAIL: image unusually large, check config"
             exit 1
           fi
-          echo "OK: fits with $((29204480 - SZ)) bytes margin"
+          echo "OK: $SZ bytes"
 
       - name: Save compiler ccache
         if: always()
