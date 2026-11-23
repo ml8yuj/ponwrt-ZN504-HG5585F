@@ -137,6 +137,12 @@ jobs:
           # CONFIG_PACKAGE_luci-app-openclash is not set
           # 体积大户，OpenWrt 自带功能不依赖
           # CONFIG_PACKAGE_yq is not set
+          # ---- 增强 A：Airoha SoC 状态页（NPU / Frame Engine / PPE 流表）----
+          # 对应恩山 XG-040G 帖里"NPU 加速 + 可观测"的思路，本机 AN7581 同样适用
+          CONFIG_PACKAGE_luci-app-airoha-npu=y
+          # Frame Engine 计数与超频项需要 devmem；PPE 表需要 debugfs
+          CONFIG_BUSYBOX_CONFIG_DEVMEM=y
+          CONFIG_KERNEL_DEBUG_FS=y
           EOF
 
           sed -i '/^CONFIG_DEVEL=/d; /^CONFIG_CCACHE=/d' .config
@@ -150,6 +156,8 @@ jobs:
           grep -E '^CONFIG_KERNEL_DEBUG_INFO' .config || echo "(clean)"
           echo "=== 代理相关（应为空）==="
           grep -E '^CONFIG_PACKAGE_(honk|luci-app-honk|dae|daeuniverse-pkg|sing-box|v2ray-geoip|v2ray-geosite|xray-core|v2ray-core|v2ray-plugin|yq)=' .config || echo "(clean)"
+          echo "=== NPU 增强（三项都应有值）==="
+          grep -E '^CONFIG_PACKAGE_luci-app-airoha-npu=|^CONFIG_BUSYBOX_CONFIG_DEVMEM=|^CONFIG_KERNEL_DEBUG_FS=' .config || echo "(MISSING - check)"
 
       - name: Download package sources
         run: make download -j"$(nproc)"
